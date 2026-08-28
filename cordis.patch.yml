@@ -1,0 +1,10 @@
+- insert:
+    - id: market-intelligence
+      name: dsh-market-intelligence
+      config:
+        storageDir: 'D:\AI\dsh\storages\dsh-market-intelligence'
+        quoteIntervalMs: 10000
+        sectorIntervalMs: 60000
+        sectorPersistIntervalMs: 300000
+        minuteRetentionTradingDays: 30
+        storageSoftLimitBytes: 536870912

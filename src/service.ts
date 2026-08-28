@@ -1,0 +1,1737 @@
+import { isMarketTradingDate, lastClosedTradingDate, marketState, nextStateChange, shanghaiDate, shanghaiMinuteOfDay, type MarketClosures } from './calendar.js';
+import { validateMarketClosures, type UserState, type WatchlistMutation } from './config.js';
+import type { Availability, Bar, CanonicalQuote, Market, MarketPhase, SectorObservation, SourceConflict } from './model.js';
+import type { MarketProvider, ProviderHistoryCapability, QuoteResult, SectorResult } from './providers/provider.js';
+import { DEFAULT_MAX_BYTES, maintainRepository, type MaintenanceResult, type RetentionPolicy } from './retention.js';
+import { MarketRepository, type CollectionGap, type ProviderHealthUpdate, type RecoveryCursorSeed, type RecoverySegmentCommit, type RepositoryHealth, type SectorQuery, type SectorResolution, type SeriesQuery } from './repository.js';
+import type { Clock, SchedulerCallbacks } from './scheduler.js';
+import { canonicalizeSymbol, SUPPORTED_INDICES } from './symbols.js';
+
+type SinaProvider = Pick<MarketProvider, 'quotes'> & {
+  sectors(signal: AbortSignal): Promise<SectorResult>;
+};
+
+export type ServiceRepository = {
+  writeBatch(quotes: CanonicalQuote[]): void;
+  latestQuotes(symbols: string[]): CanonicalQuote[];
+  writeBars(bars: Bar[]): void;
+  querySeries(query: SeriesQuery): Bar[];
+  writeSectors(sectors: SectorObservation[], resolution?: SectorResolution): void;
+  readSectors(query?: SectorQuery): SectorObservation[];
+  updateProviderHealth(update: ProviderHealthUpdate): void;
+  recordGap?(gap: CollectionGap): void;
+  initializeRecoveryCursors?(provider: string, interval: 'quote', seeds: RecoveryCursorSeed[], updatedAt: string): void;
+  recoveryCursor?(provider: string, market: Market, interval: 'quote'): string | null;
+  commitRecoverySegment?(segment: RecoverySegmentCommit): void;
+  health(): RepositoryHealth;
+  close(): void;
+};
+
+export type ServiceStateStore = {
+  mutateWatchlist(mutation: WatchlistMutation): Promise<UserState>;
+};
+
+export type ServiceScheduler = {
+  start(callbacks: SchedulerCallbacks): () => Promise<void>;
+  health?(): { pendingTimers?: number; inFlight?: number };
+};
+
+export type MarketServiceConfig = {
+  providerBatchSize?: number;
+  quoteFreshnessMs?: number;
+  sectorFreshnessMs?: number;
+  conflictComparableWindowMs?: number;
+  minuteRetentionTradingDays?: number;
+  storageSoftLimitBytes?: number;
+};
+
+export type MaintenanceRunner = (
+  repository: ServiceRepository,
+  policy: RetentionPolicy,
+  now: Date,
+) => MaintenanceResult | Promise<MaintenanceResult>;
+
+export type MarketServiceOptions = {
+  clock: Pick<Clock, 'now'>;
+  tencent: MarketProvider;
+  sina: SinaProvider;
+  repository: ServiceRepository;
+  scheduler: ServiceScheduler;
+  stateStore: ServiceStateStore;
+  initialState: UserState;
+  config?: MarketServiceConfig;
+  maintenance?: MaintenanceRunner;
+};
+
+export type StatusRequest = { market?: Market };
+
+export type StatusResult = {
+  asOf: string;
+  collectionActive: boolean;
+  lastSuccessfulUpdate: string | null;
+  markets: Array<{
+    market: Market;
+    phase: MarketPhase;
+    tradingDate: string;
+    sessionStart: string | null;
+    sessionEnd: string | null;
+    collectionActive: boolean;
+    calendarConfidence: 'configured' | 'degraded';
+  }>;
+};
+
+export type QuotesRequest = {
+  symbols?: string[];
+  refresh?: boolean;
+};
+
+export type QuotesResult = {
+  availability: Availability;
+  items: CanonicalQuote[];
+  conflicts: SourceConflict[];
+};
+
+export type ServiceSeriesRequest = {
+  symbol: string;
+  interval: 'minute' | 'day' | 'week' | 'month';
+  refresh?: boolean;
+  start?: string;
+  end?: string;
+  adjustment?: 'qfq';
+  limit?: number;
+};
+
+export type SeriesResult = {
+  availability: Availability;
+  source: 'storage' | 'provider' | 'both' | null;
+  items: Bar[];
+};
+
+export type SectorsRequest = {
+  category?: string;
+  sort?: 'changePercent' | 'turnover' | 'netFlow';
+  direction?: 'asc' | 'desc';
+  limit?: number;
+  refresh?: boolean;
+};
+
+export type SectorsResult = {
+  availability: Availability;
+  items: SectorObservation[];
+};
+
+export type AuctionRequest = {
+  market: Market;
+  symbols?: string[];
+};
+
+export type AuctionServiceResult = {
+  availability: Availability;
+  phase: MarketPhase;
+  reason: string | null;
+  items: CanonicalQuote[];
+};
+
+export type WatchlistRequest = {
+  action: 'get' | 'add' | 'remove';
+  symbol?: string;
+};
+
+export type WatchlistResult = { watchlist: string[] };
+
+export type ProviderServiceHealth = {
+  provider: string;
+  available: boolean;
+  latencyMs: number | null;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  consecutiveFailures: number;
+  errorCategory: ErrorCategory | null;
+};
+
+export type HealthResult = {
+  providers: ProviderServiceHealth[];
+  scheduler: {
+    state: 'running' | 'stopping' | 'stopped';
+    pendingTimers: number | null;
+    inFlight: number | null;
+  };
+  database: {
+    databaseBytes: number;
+    liveDatabaseBytes: number;
+    counts: RepositoryHealth['counts'];
+  };
+  gaps: RepositoryHealth['gaps'];
+  retention: {
+    status: 'ok' | 'over-cap' | 'unknown';
+    lastResult: Record<string, unknown> | null;
+  };
+};
+
+type ErrorCategory = 'timeout' | 'abort' | 'http' | 'decode' | 'parse' | 'storage' | 'network' | 'validation' | 'partial' | 'unknown';
+
+type Attempt = { sequence: number; startedAt: number; attemptedAt: string };
+
+type ProviderQuoteFetch = {
+  items: Map<string, CanonicalQuote>;
+  unresolved: string[];
+};
+
+type RefreshResult = {
+  selected: Map<string, CanonicalQuote>;
+};
+
+type QuoteWriteState = {
+  sealed: boolean;
+  active: number;
+  waiters: Set<() => void>;
+};
+
+type QuoteWriteLease = {
+  market: Market;
+  tradingDate: string;
+  release(): void;
+};
+
+class StorageFailure extends Error {
+  readonly #original: unknown;
+
+  constructor(original: unknown) {
+    super('Storage operation failed');
+    this.name = 'StorageFailure';
+    this.#original = original;
+  }
+
+  unwrap(): unknown {
+    return this.#original;
+  }
+}
+
+const MARKETS: Market[] = ['CN', 'HK'];
+const PROVIDERS = ['sina', 'tencent'] as const;
+const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2})$/;
+const DEFAULT_QUOTE_FRESHNESS_MS = 30_000;
+const DEFAULT_SECTOR_FRESHNESS_MS = 120_000;
+const DEFAULT_CONFLICT_WINDOW_MS = 60_000;
+const DEFAULT_BATCH_SIZE = 100;
+const MAX_RECOVERY_LOOKBACK_MS = 31 * 24 * 60 * 60 * 1_000;
+const MAX_RECOVERY_SEGMENTS = 128;
+const MAX_RECOVERY_ITEMS = 10_000;
+
+export class MarketService {
+  private readonly clock: Pick<Clock, 'now'>;
+  private readonly tencent: MarketProvider;
+  private readonly sina: SinaProvider;
+  private readonly repository: ServiceRepository;
+  private readonly scheduler: ServiceScheduler;
+  private readonly stateStore: ServiceStateStore;
+  private readonly config: Required<MarketServiceConfig>;
+  private readonly maintenanceRunner: MaintenanceRunner;
+  private readonly providerHealth = new Map<string, ProviderServiceHealth>();
+  private readonly lifecycle = new AbortController();
+  private readonly directOperations = new Set<Promise<unknown>>();
+  private readonly quoteWriteStates = new Map<string, QuoteWriteState>();
+  private readonly attemptSequences = new Map<string, number>();
+  private readonly appliedAttemptSequences = new Map<string, number>();
+  private readonly cancelScheduler: () => Promise<void>;
+  private readonly recoveryAnchor: number | null;
+  private readonly recoveryEnd: Date;
+  private readonly recoveryOperations = new Map<Market, Promise<void>>();
+  private readonly recoveredMarkets = new Set<Market>();
+  private watchlistSnapshot: string[];
+  private closures: MarketClosures;
+  private watchlistQueue: Promise<void> = Promise.resolve();
+  private sectorCache: SectorObservation[] = [];
+  private sectorCacheIsLive = false;
+  private lastSuccessfulUpdate: string | null = null;
+  private lastMaintenance: Record<string, unknown> | null = null;
+  private disposing = false;
+  private disposed = false;
+  private disposal: Promise<void> | null = null;
+
+  constructor(options: MarketServiceOptions) {
+    if (!options || typeof options !== 'object') throw new Error('MarketService options are required');
+    if (!options.clock || typeof options.clock.now !== 'function') throw new Error('MarketService clock is required');
+    if (!options.tencent || !options.sina || !options.repository || !options.scheduler || !options.stateStore) {
+      throw new Error('MarketService dependencies are required');
+    }
+    this.clock = options.clock;
+    this.tencent = options.tencent;
+    this.sina = options.sina;
+    this.repository = options.repository;
+    this.scheduler = options.scheduler;
+    this.stateStore = options.stateStore;
+    this.config = validatedConfig(options.config ?? {});
+    this.watchlistSnapshot = canonicalWatchlist(options.initialState?.watchlist ?? []);
+    this.closures = cloneClosures(options.initialState?.closures ?? {});
+    this.maintenanceRunner = options.maintenance ?? ((repository, policy, now) => maintainRepository(repository as MarketRepository, policy, now));
+    let persistedHealth: RepositoryHealth | null = null;
+    try {
+      persistedHealth = this.readRepositoryHealth();
+      for (const item of persistedHealth.providers) {
+        this.providerHealth.set(item.provider, serviceHealthFromStored(item));
+      }
+    } catch (error) {
+      if (!(error instanceof StorageFailure)) throw error;
+    }
+    this.recoveryAnchor = recoveryAnchor(persistedHealth?.providers ?? []);
+    this.recoveryEnd = this.now();
+    this.bootstrapRecoveryCursors();
+    this.cancelScheduler = this.scheduler.start({
+      collectQuotes: (markets, requestSignal) => this.collectQuotes(markets, requestSignal),
+      collectSectors: (requestSignal, persist) => this.collectSectors(requestSignal, persist),
+      runMaintenance: async (market, tradingDate, requestSignal) => {
+        await this.maintain(market, tradingDate, requestSignal);
+      },
+    });
+  }
+
+  status(request: StatusRequest = {}): StatusResult {
+    this.assertUsable();
+    if (request.market !== undefined) validateMarket(request.market);
+    const now = this.now();
+    const state = marketState(now, this.closures);
+    const selected = request.market === undefined ? MARKETS : [request.market];
+    const markets = selected.map((market) => {
+      const session = state[market];
+      const bounds = sessionBounds(market, session.phase, shanghaiMinuteOfDay(now));
+      return {
+        market,
+        phase: session.phase,
+        tradingDate: session.tradingDate,
+        sessionStart: bounds.start,
+        sessionEnd: bounds.end,
+        collectionActive: session.active && !this.disposing && !this.disposed,
+        calendarConfidence: session.calendarConfidence,
+      };
+    });
+    return {
+      asOf: now.toISOString(),
+      collectionActive: markets.some(({ collectionActive }) => collectionActive),
+      lastSuccessfulUpdate: this.lastSuccessfulUpdate,
+      markets,
+    };
+  }
+
+  quotes(request: QuotesRequest = {}, requestSignal: AbortSignal): Promise<QuotesResult> {
+    return this.trackDirect(requestSignal, (operationSignal) => this.quotesOperation(request, operationSignal));
+  }
+
+  private async quotesOperation(request: QuotesRequest, requestSignal: AbortSignal): Promise<QuotesResult> {
+    const defaultSymbols = this.watchlistSnapshot.length > 0
+      ? this.watchlistSnapshot
+      : Object.values(SUPPORTED_INDICES);
+    const symbols = requestedSymbols(request.symbols ?? defaultSymbols);
+    if (symbols.length > 100) throw new Error('At most 100 symbols may be requested');
+    if (symbols.length === 0) return unavailableQuotes();
+
+    const cached = this.cachedQuotes(symbols);
+    const state = marketState(this.now(), this.closures);
+    // Scheduled collection is session-gated by the scheduler. An explicit user
+    // refresh is different: providers expose the latest closing snapshot after
+    // hours, which is essential when an earlier collection attempt failed.
+    const refreshSymbols = request.refresh === true ? symbols : [];
+    const leases = new Map<Market, QuoteWriteLease>();
+    for (const market of new Set(refreshSymbols.map((symbol) => canonicalizeSymbol(symbol).market))) {
+      const lease = this.acquireQuoteWrite(market, state[market].tradingDate);
+      if (lease) leases.set(market, lease);
+    }
+    const attempted = new Set(refreshSymbols);
+    let selected = new Map<string, CanonicalQuote>();
+    let persistedSymbols = new Set<string>();
+    try {
+      selected = refreshSymbols.length > 0
+        ? (await this.refreshQuotes(refreshSymbols, requestSignal)).selected
+        : new Map<string, CanonicalQuote>();
+
+      const liveRecords = symbols.flatMap((symbol) => {
+        const item = selected.get(symbol);
+        return item ? [item] : [];
+      });
+      if (liveRecords.length > 0) {
+        persistedSymbols = this.writeAdmittedQuotes(liveRecords, leases);
+        if (persistedSymbols.size > 0) this.lastSuccessfulUpdate = this.now().toISOString();
+      }
+    } finally {
+      for (const lease of leases.values()) lease.release();
+    }
+
+    const items: CanonicalQuote[] = [];
+    const conflicts: SourceConflict[] = [];
+    let liveReturned = false;
+    for (const symbol of symbols) {
+      const live = selected.get(symbol);
+      const previous = cached.get(symbol);
+      if (live) {
+        const conflict = previous ? sourceConflict(live, previous, this.config.conflictComparableWindowMs, this.now().toISOString()) : null;
+        if (conflict) conflicts.push(conflict);
+        const preferred = conflict && previous?.source === 'tencent' && live.source !== 'tencent' ? previous : live;
+        const returnedFromLive = preferred === live;
+        const representedDate = shanghaiDate(live.marketTime ?? live.fetchedAt);
+        const liveRepresentsCurrentTradingDate = representedDate === state[live.market].tradingDate;
+        items.push({ ...preferred, isStale: returnedFromLive ? live.isStale || !liveRepresentsCurrentTradingDate : true });
+        liveReturned ||= returnedFromLive && liveRepresentsCurrentTradingDate;
+        continue;
+      }
+      if (previous) {
+        const stale = attempted.has(symbol)
+          || previous.isStale
+          || (state[previous.market].active && (
+            isOlderThan(previous.fetchedAt, this.now(), this.config.quoteFreshnessMs)
+            || (previous.marketTime !== null && isOlderThan(previous.marketTime, this.now(), this.config.quoteFreshnessMs))
+          ));
+        items.push({ ...previous, isStale: stale });
+      }
+    }
+
+    return {
+      availability: availabilityFor(items, liveReturned),
+      items,
+      conflicts,
+    };
+  }
+
+  series(request: ServiceSeriesRequest, requestSignal: AbortSignal): Promise<SeriesResult> {
+    return this.trackDirect(requestSignal, (operationSignal) => this.seriesOperation(request, operationSignal));
+  }
+
+  private async seriesOperation(request: ServiceSeriesRequest, requestSignal: AbortSignal): Promise<SeriesResult> {
+    if (!request || typeof request !== 'object') throw new Error('series request is required');
+    const canonical = canonicalizeSymbol(request.symbol);
+    validateInterval(request.interval);
+    const limit = validatedLimit(request.limit ?? 500);
+    if (request.adjustment !== undefined && request.adjustment !== 'qfq') throw new Error('series adjustment is unsupported');
+    if (request.start !== undefined) requireTimestamp(request.start, 'series start');
+    if (request.end !== undefined) requireTimestamp(request.end, 'series end');
+    if (request.start !== undefined && request.end !== undefined && Date.parse(request.start) >= Date.parse(request.end)) {
+      throw new Error('series start must be before end');
+    }
+
+    const cached = this.withStorageHealth(() => this.repository.querySeries({
+      symbol: canonical.symbol,
+      interval: request.interval,
+      start: request.start,
+      end: request.end,
+      limit,
+    })).map((item) => canonicalBar(item, canonical.symbol, canonical.market, request.interval));
+
+    let providerItems: Bar[] = [];
+    let refreshFailed = false;
+    if (request.refresh !== false) {
+      const attempt = this.beginAttempt('tencent');
+      try {
+        const response = await this.tencent.series({ symbol: canonical.symbol, interval: request.interval, count: limit }, requestSignal);
+        throwIfAborted(requestSignal);
+        if (!response || !isDenseArray(response.items)) throw new Error('invalid provider series result');
+        let invalid = false;
+        for (const item of response.items) {
+          try {
+            providerItems.push(canonicalBar(item, canonical.symbol, canonical.market, request.interval));
+          } catch {
+            invalid = true;
+          }
+        }
+        const category = invalid ? (providerItems.length > 0 ? 'partial' : 'validation') : null;
+        refreshFailed = category !== null && providerItems.length === 0;
+        this.finishAttempt('tencent', attempt, category, providerItems.length > 0 || response.items.length === 0);
+      } catch (error) {
+        if (requestSignal.aborted) throw abortReason(requestSignal);
+        if (error instanceof StorageFailure) throw error;
+        refreshFailed = true;
+        const category = isValidationFailure(error) ? 'validation' : errorCategory(error);
+        this.finishAttempt('tencent', attempt, category, false);
+      }
+    }
+    if (providerItems.length > 0) this.withStorageHealth(() => this.repository.writeBars(providerItems));
+
+    const merged = new Map<string, Bar>();
+    for (const item of cached) merged.set(item.timestamp, item);
+    for (const item of providerItems) merged.set(item.timestamp, item);
+    const items = [...merged.values()]
+      .filter((item) => request.start === undefined || Date.parse(item.timestamp) >= Date.parse(request.start))
+      .filter((item) => request.end === undefined || Date.parse(item.timestamp) < Date.parse(request.end))
+      .sort(compareTimestamp)
+      .slice(-limit);
+    const source = cached.length > 0 && providerItems.length > 0
+      ? 'both'
+      : providerItems.length > 0
+        ? 'provider'
+        : cached.length > 0
+          ? 'storage'
+          : null;
+    return {
+      availability: providerItems.length > 0 ? 'live' : cached.length > 0 ? refreshFailed ? 'stale' : 'cached' : 'unavailable',
+      source,
+      items,
+    };
+  }
+
+  sectors(request: SectorsRequest = {}, requestSignal: AbortSignal): Promise<SectorsResult> {
+    return this.trackDirect(requestSignal, (operationSignal) => this.sectorsOperation(request, operationSignal));
+  }
+
+  private async sectorsOperation(request: SectorsRequest, requestSignal: AbortSignal): Promise<SectorsResult> {
+    const limit = validatedLimit(request.limit ?? 500);
+    if (request.category !== undefined && (typeof request.category !== 'string' || request.category.trim() === '')) {
+      throw new Error('sector category must be a non-empty string');
+    }
+    const sort = request.sort ?? 'changePercent';
+    if (!['changePercent', 'turnover', 'netFlow'].includes(sort)) throw new Error('sector sort is unsupported');
+    const direction = request.direction ?? 'desc';
+    if (direction !== 'asc' && direction !== 'desc') throw new Error('sector direction is unsupported');
+
+    let refreshFailed = false;
+    if (request.refresh === true) {
+      try {
+        await this.collectSectorsOperation(requestSignal, true);
+      } catch (error) {
+        if (requestSignal.aborted) throw abortReason(requestSignal);
+        if (error instanceof StorageFailure) throw error;
+        refreshFailed = true;
+      }
+    }
+
+    const fromMemory = this.sectorCache.length > 0;
+    const source = fromMemory
+      ? this.sectorCache.map((item) => ({ ...item }))
+      : this.withStorageHealth(() => this.repository.readSectors({ category: request.category, resolution: 'intraday', limit: 10_000 }))
+        .map((item) => canonicalSector(item));
+    const state = marketState(this.now(), this.closures).CN;
+    const items = source
+      .filter((item) => request.category === undefined || item.category === request.category)
+      .map((item) => ({
+        ...item,
+        isStale: item.isStale || refreshFailed || (state.active && isOlderThan(item.fetchedAt, this.now(), this.config.sectorFreshnessMs)),
+      }))
+      .sort((left, right) => compareSectors(left, right, sort, direction))
+      .slice(0, limit);
+    return {
+      availability: items.length === 0
+        ? 'unavailable'
+        : items.some(({ isStale }) => isStale)
+          ? 'stale'
+          : fromMemory && this.sectorCacheIsLive
+            ? 'live'
+            : 'cached',
+      items,
+    };
+  }
+
+  auction(request: AuctionRequest, requestSignal: AbortSignal): Promise<AuctionServiceResult> {
+    return this.trackDirect(requestSignal, (operationSignal) => this.auctionOperation(request, operationSignal));
+  }
+
+  private async auctionOperation(request: AuctionRequest, requestSignal: AbortSignal): Promise<AuctionServiceResult> {
+    if (!request || typeof request !== 'object') throw new Error('auction request is required');
+    validateMarket(request.market);
+    const phase = marketState(this.now(), this.closures)[request.market].phase;
+    const expectedPhase: MarketPhase = request.market === 'CN' ? 'auction' : 'preopen';
+    if (phase !== expectedPhase) {
+      return { availability: 'unavailable', phase, reason: `${request.market} auction is inactive`, items: [] };
+    }
+    const requested = requestedSymbols(request.symbols ?? this.watchlistSnapshot);
+    if (requested.length > 100) throw new Error('At most 100 symbols may be requested');
+    const symbols = requested.filter((symbol) => canonicalizeSymbol(symbol).market === request.market);
+    if (symbols.length === 0) return { availability: 'unavailable', phase, reason: 'No symbols requested', items: [] };
+
+    const attempt = this.beginAttempt('tencent');
+    try {
+      const response = await this.tencent.auction(symbols, phase, requestSignal);
+      throwIfAborted(requestSignal);
+      if (!response || !isDenseArray(response.items)) throw new Error('invalid provider auction result');
+      if (response.phase !== phase) throw new Error('invalid provider auction phase');
+      const requestedSymbolsSet = new Set(symbols);
+      const seen = new Set<string>();
+      const items: CanonicalQuote[] = [];
+      let invalid = false;
+      for (const raw of response.items) {
+        try {
+          const item = canonicalQuote(raw, 'tencent');
+          if (!requestedSymbolsSet.has(item.symbol) || item.market !== request.market || seen.has(item.symbol)) throw new Error('unexpected auction symbol');
+          seen.add(item.symbol);
+          items.push({ ...item, isStale: false });
+        } catch {
+          invalid = true;
+        }
+      }
+      if (invalid && items.length === 0) throw new Error('invalid provider auction items');
+      this.finishAttempt('tencent', attempt, invalid ? (items.length > 0 ? 'partial' : 'validation') : null, items.length > 0 || response.items.length === 0);
+      return {
+        availability: items.length > 0 ? 'live' : 'unavailable',
+        phase,
+        reason: items.length > 0 ? null : 'No auction observations available',
+        items,
+      };
+    } catch (error) {
+      if (requestSignal.aborted) throw abortReason(requestSignal);
+      if (error instanceof StorageFailure) throw error;
+      this.finishAttempt('tencent', attempt, isValidationFailure(error) ? 'validation' : errorCategory(error), false);
+      const cached = this.cachedQuotes(symbols);
+      const items = symbols.flatMap((symbol) => {
+        const item = cached.get(symbol);
+        return item ? [{ ...item, isStale: true }] : [];
+      });
+      return {
+        availability: items.length > 0 ? 'stale' : 'unavailable',
+        phase,
+        reason: items.length > 0 ? 'Live auction refresh failed' : 'No auction observations available',
+        items,
+      };
+    }
+  }
+
+  watchlist(request: WatchlistRequest, requestSignal?: AbortSignal): Promise<WatchlistResult> {
+    return this.trackDirect(requestSignal, (operationSignal) => this.watchlistOperation(request, operationSignal));
+  }
+
+  private async watchlistOperation(request: WatchlistRequest, requestSignal: AbortSignal): Promise<WatchlistResult> {
+    if (!request || typeof request !== 'object') throw new Error('watchlist request is required');
+    if (!['get', 'add', 'remove'].includes(request.action)) throw new Error('watchlist action is unsupported');
+    const action = request.action;
+    if (action === 'get') {
+      await this.watchlistQueue;
+      throwIfAborted(requestSignal);
+      return { watchlist: [...this.watchlistSnapshot] };
+    }
+    if (typeof request.symbol !== 'string') throw new Error(`watchlist ${action} requires a symbol`);
+    const symbol = canonicalizeSymbol(request.symbol).symbol;
+    const operation = this.watchlistQueue.then(async () => {
+      throwIfAborted(requestSignal);
+      this.assertUsable();
+      if (action === 'add' && this.watchlistSnapshot.includes(symbol)) throw new Error(`${symbol} is already in the watchlist`);
+      if (action === 'add' && this.watchlistSnapshot.length >= 100) throw new Error('Watchlist cannot contain more than 100 symbols');
+      if (action === 'remove' && !this.watchlistSnapshot.includes(symbol)) throw new Error(`${symbol} is not in the watchlist`);
+      throwIfAborted(requestSignal);
+      this.assertUsable();
+      const persisted = await this.stateStore.mutateWatchlist((current) => mutateCanonicalWatchlist(current, action, symbol));
+      const next = canonicalWatchlist(persisted.watchlist);
+      this.watchlistSnapshot = next;
+      this.closures = cloneClosures(persisted.closures);
+      throwIfAborted(requestSignal);
+      this.assertUsable();
+      return { watchlist: [...next] };
+    });
+    this.watchlistQueue = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  health(): HealthResult {
+    this.assertUsable();
+    let stored: RepositoryHealth;
+    try {
+      stored = this.readRepositoryHealth();
+    } catch (error) {
+      throw unwrapStorageFailure(error);
+    }
+    const providers = new Map<string, ProviderServiceHealth>();
+    for (const item of stored.providers) providers.set(item.provider, serviceHealthFromStored(item));
+    for (const provider of PROVIDERS) {
+      if (!providers.has(provider)) providers.set(provider, emptyProviderHealth(provider));
+    }
+    for (const [provider, item] of this.providerHealth) providers.set(provider, { ...item });
+    const schedulerHealth = this.scheduler.health?.() ?? {};
+    const lastResult = this.lastMaintenance ?? stored.lastMaintenance;
+    const capSatisfied = lastResult?.capSatisfied;
+    return canonicalHealthValue({
+      providers: [...providers.values()].sort((left, right) => left.provider.localeCompare(right.provider)),
+      scheduler: {
+        state: this.disposed ? 'stopped' : this.disposing ? 'stopping' : 'running',
+        pendingTimers: nonNegativeSafeIntegerOrNull(schedulerHealth.pendingTimers),
+        inFlight: nonNegativeSafeIntegerOrNull(schedulerHealth.inFlight),
+      },
+      database: {
+        databaseBytes: stored.databaseBytes,
+        liveDatabaseBytes: stored.liveDatabaseBytes,
+        counts: { ...stored.counts },
+      },
+      gaps: structuredClone(stored.gaps),
+      retention: {
+        status: capSatisfied === true ? 'ok' : capSatisfied === false ? 'over-cap' : 'unknown',
+        lastResult: lastResult === null ? null : structuredClone(lastResult),
+      },
+    });
+  }
+
+  collectQuotes(markets: Market[], requestSignal: AbortSignal): Promise<{
+    marketTimes: Partial<Record<Market, string | null>>;
+    commit(markets: Market[], signal: AbortSignal): Promise<void>;
+    release(): Promise<void>;
+  }> {
+    return this.trackDirect(requestSignal, (operationSignal) => this.collectQuotesOperation(markets, operationSignal));
+  }
+
+  private async collectQuotesOperation(markets: Market[], requestSignal: AbortSignal): Promise<{
+    marketTimes: Partial<Record<Market, string | null>>;
+    commit(markets: Market[], signal: AbortSignal): Promise<void>;
+    release(): Promise<void>;
+  }> {
+    if (!isDenseArray(markets)) throw new Error('collection markets must be a dense array');
+    const requestedMarkets = [...new Set(markets.map((market) => {
+      validateMarket(market);
+      return market;
+    }))];
+    const state = marketState(this.now(), this.closures);
+    const leases = new Map<Market, QuoteWriteLease>();
+    for (const market of requestedMarkets) {
+      const lease = this.acquireQuoteWrite(market, state[market].tradingDate);
+      if (lease) leases.set(market, lease);
+    }
+    const admittedMarkets = requestedMarkets.filter((market) => leases.has(market));
+    const scheduledSymbols = requestedSymbols([
+      ...this.watchlistSnapshot,
+      ...Object.values(SUPPORTED_INDICES),
+    ]).filter((symbol) => admittedMarkets.includes(canonicalizeSymbol(symbol).market));
+    let selected: Map<string, CanonicalQuote>;
+    try {
+      selected = (await this.refreshQuotes(scheduledSymbols, requestSignal)).selected;
+    } catch (error) {
+      for (const lease of leases.values()) lease.release();
+      throw error;
+    }
+    const staged = [...selected.values()];
+    const marketTimes: Partial<Record<Market, string | null>> = {};
+    for (const market of requestedMarkets) {
+      marketTimes[market] = newestMarketTime(staged.filter((item) => item.market === market));
+    }
+    const committed = new Set<Market>();
+    const releaseMarkets = (marketsToRelease: Iterable<Market>): void => {
+      for (const market of marketsToRelease) {
+        leases.get(market)?.release();
+        leases.delete(market);
+      }
+    };
+    return {
+      marketTimes,
+      commit: (approvedMarkets, commitSignal) => {
+        let releaseTargets: Market[] = [];
+        return this.trackDirect(commitSignal, async (operationSignal) => {
+          throwIfAborted(operationSignal);
+          if (!isDenseArray(approvedMarkets)) throw new Error('approved markets must be a dense array');
+          const approved = [...new Set(approvedMarkets.map((market) => {
+            validateMarket(market);
+            if (!requestedMarkets.includes(market)) throw new Error('cannot commit an unrequested market');
+            if (marketTimes[market] === null || marketTimes[market] === undefined) throw new Error(`${market} has no advancing market timestamp`);
+            return market;
+          }))].filter((market) => !committed.has(market));
+          const rows = staged.filter((item) => approved.includes(item.market));
+          const persisted = this.writeAdmittedQuotes(rows, leases);
+          for (const market of approved) committed.add(market);
+          if (persisted.size > 0) this.lastSuccessfulUpdate = this.now().toISOString();
+          releaseTargets = approved;
+        }).then(
+          () => releaseMarkets(releaseTargets),
+          (error: unknown) => {
+            releaseMarkets([...leases.keys()]);
+            throw error;
+          },
+        );
+      },
+      release: async () => releaseMarkets(requestedMarkets),
+    };
+  }
+
+  collectSectors(requestSignal: AbortSignal, persist: boolean): Promise<void> {
+    return this.trackDirect(requestSignal, (operationSignal) => this.collectSectorsOperation(operationSignal, persist));
+  }
+
+  private async collectSectorsOperation(requestSignal: AbortSignal, persist: boolean): Promise<void> {
+    if (typeof persist !== 'boolean') throw new Error('sector persistence flag must be boolean');
+    const attempt = this.beginAttempt('sina');
+    let attemptFinished = false;
+    let items: SectorObservation[] = [];
+    try {
+      const response = await this.sina.sectors(requestSignal);
+      throwIfAborted(requestSignal);
+      if (!response || !isDenseArray(response.items)) throw new Error('invalid provider sector result');
+      let invalid = false;
+      for (const raw of response.items) {
+        try {
+          items.push(canonicalSector(raw, 'sina'));
+        } catch {
+          invalid = true;
+        }
+      }
+      if (items.length === 0 && response.items.length === 0) {
+        this.finishAttempt('sina', attempt, 'parse', false);
+        attemptFinished = true;
+        throw new Error('Sina sector response was empty');
+      }
+      const category = invalid ? (items.length > 0 ? 'partial' : 'validation') : null;
+      this.finishAttempt('sina', attempt, category, items.length > 0 || response.items.length === 0);
+      attemptFinished = true;
+      if (invalid && items.length === 0) throw new Error('invalid Sina sector response');
+    } catch (error) {
+      if (requestSignal.aborted) throw abortReason(requestSignal);
+      if (error instanceof StorageFailure) throw error;
+      if (!attemptFinished) {
+        this.finishAttempt('sina', attempt, isValidationFailure(error) ? 'validation' : errorCategory(error), false);
+      }
+      throw error;
+    }
+    if (persist) this.withStorageHealth(() => this.repository.writeSectors(items, 'intraday'));
+    this.sectorCache = items.map((item) => ({ ...item, isStale: false }));
+    this.sectorCacheIsLive = true;
+    this.lastSuccessfulUpdate = this.now().toISOString();
+  }
+
+  maintain(market?: Market, closedTradingDate?: string, requestSignal?: AbortSignal): Promise<MaintenanceResult> {
+    return this.trackDirect(requestSignal, (operationSignal) => this.maintainOperation(market, closedTradingDate, operationSignal));
+  }
+
+  private async maintainOperation(market: Market | undefined, closedTradingDate: string | undefined, requestSignal: AbortSignal): Promise<MaintenanceResult> {
+    if (market !== undefined) validateMarket(market);
+    if (closedTradingDate !== undefined) {
+      if (market === undefined) throw new Error('market is required with a closed trading date');
+      requireTradingDate(closedTradingDate);
+      if (!isMarketTradingDate(closedTradingDate, market, this.closures)) {
+        throw new Error(`${market} date ${closedTradingDate} is not a trading date`);
+      }
+      if (closedTradingDate > lastClosedTradingDate(this.now(), market, this.closures)) {
+        throw new Error(`${market} trading date ${closedTradingDate} is not closed`);
+      }
+      await this.recoverDowntime(market, requestSignal);
+      await this.sealQuoteWritesAndWait(market, closedTradingDate, requestSignal);
+    }
+    let result: MaintenanceResult;
+    try {
+      result = await this.maintenanceRunner(this.repository, {
+        market,
+        closedTradingDate,
+        closures: cloneClosures(this.closures),
+        minuteTradingDays: this.config.minuteRetentionTradingDays,
+        maxBytes: this.config.storageSoftLimitBytes,
+      }, this.now());
+    } catch (error) {
+      this.recordStorageFailure();
+      throw new StorageFailure(error);
+    }
+    throwIfAborted(requestSignal);
+    this.lastMaintenance = structuredClone(result) as unknown as Record<string, unknown>;
+    return structuredClone(result);
+  }
+
+  private recoverDowntime(market: Market, requestSignal: AbortSignal): Promise<void> {
+    if (this.recoveredMarkets.has(market)) return Promise.resolve();
+    const running = this.recoveryOperations.get(market);
+    if (running) return running;
+    const operation = this.recoverDowntimeOperation(market, requestSignal).then(() => {
+      this.recoveredMarkets.add(market);
+    }).finally(() => {
+      this.recoveryOperations.delete(market);
+    });
+    this.recoveryOperations.set(market, operation);
+    return operation;
+  }
+
+  private async recoverDowntimeOperation(market: Market, requestSignal: AbortSignal): Promise<void> {
+    const cursor = this.readRecoveryCursor(market);
+    if (cursor === null) {
+      if (this.recoveryAnchor === null) return;
+      this.withStorageHealth(() => {
+        throw new Error('repository recovery cursor bootstrap is unavailable');
+      });
+      return;
+    }
+    const anchor = Date.parse(cursor);
+    if (anchor >= this.recoveryEnd.getTime()) return;
+    const boundedStart = new Date(Math.max(anchor, this.recoveryEnd.getTime() - MAX_RECOVERY_LOOKBACK_MS));
+    const intervals = activeMarketIntervals(boundedStart, this.recoveryEnd, market, this.closures);
+    const capability = quoteHistoryCapability(this.tencent, market);
+    const symbols = requestedSymbols([
+      ...this.watchlistSnapshot,
+      ...Object.values(SUPPORTED_INDICES),
+    ]).filter((symbol) => canonicalizeSymbol(symbol).market === market);
+    const attempt = capability && this.tencent.backfill && intervals.length > 0 ? this.beginAttempt('tencent') : null;
+    let attemptCategory: ErrorCategory | null = null;
+    let attemptHadSuccess = false;
+    for (const interval of intervals) {
+      throwIfAborted(requestSignal);
+      let items: CanonicalQuote[] = [];
+      let complete = false;
+      if (capability && this.tencent.backfill) {
+        const requestLimit = Math.min(capability.maxItems, MAX_RECOVERY_ITEMS);
+        try {
+          const response = await this.tencent.backfill({
+            market,
+            interval: 'quote',
+            start: interval.start,
+            end: interval.end,
+            symbols,
+            limit: requestLimit,
+          }, requestSignal);
+          throwIfAborted(requestSignal);
+          if (!response || !isDenseArray(response.items) || response.items.length > requestLimit || typeof response.complete !== 'boolean') {
+            throw new Error('invalid provider history result');
+          }
+          items = response.items.map((raw) => canonicalHistoricalQuote(raw, 'tencent', market, symbols, interval));
+          complete = response.complete;
+          attemptHadSuccess ||= complete;
+          if (!complete && attemptCategory === null) attemptCategory = 'partial';
+        } catch (error) {
+          if (requestSignal.aborted) throw abortReason(requestSignal);
+          if (attemptCategory === null) attemptCategory = isValidationFailure(error) ? 'validation' : errorCategory(error);
+        }
+      }
+      const gap: CollectionGap | null = complete ? null : {
+        market,
+        symbol: null,
+        interval: 'quote',
+        start: interval.start,
+        end: interval.end,
+        reason: 'provider_history_unavailable',
+        recordedAt: this.recoveryEnd.toISOString(),
+      };
+      this.commitRecoverySegment({
+        provider: 'tencent',
+        market,
+        interval: 'quote',
+        start: interval.start,
+        end: interval.end,
+        completedAt: this.recoveryEnd.toISOString(),
+        items,
+        gap,
+      });
+    }
+    if (attempt !== null) this.finishAttempt('tencent', attempt, attemptCategory, attemptHadSuccess);
+  }
+
+  private bootstrapRecoveryCursors(): void {
+    if (this.recoveryAnchor === null) return;
+    const initialize = this.repository.initializeRecoveryCursors;
+    if (initialize === undefined) return;
+    const cursor = new Date(this.recoveryAnchor).toISOString();
+    this.withStorageHealth(() => initialize.call(this.repository, 'tencent', 'quote', MARKETS.map((market) => ({
+      market,
+      cursor,
+    })), this.recoveryEnd.toISOString()));
+  }
+
+  private readRecoveryCursor(market: Market): string | null {
+    const read = this.repository.recoveryCursor;
+    if (read === undefined) return null;
+    const cursor = this.withStorageHealth(() => read.call(this.repository, 'tencent', market, 'quote'));
+    if (cursor !== null) requireTimestamp(cursor, 'recovery cursor');
+    return cursor;
+  }
+
+  private commitRecoverySegment(segment: RecoverySegmentCommit): void {
+    this.withStorageHealth(() => {
+      const commit = this.repository.commitRecoverySegment;
+      if (commit === undefined) throw new Error('repository does not support crash-consistent recovery persistence');
+      commit.call(this.repository, segment);
+    });
+  }
+
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
+    this.disposing = true;
+    let resolveDisposal!: () => void;
+    let rejectDisposal!: (error: unknown) => void;
+    const sharedDisposal = new Promise<void>((resolve, reject) => {
+      resolveDisposal = resolve;
+      rejectDisposal = reject;
+    });
+    this.disposal = sharedDisposal;
+    let schedulerCancellation: Promise<void>;
+    try {
+      schedulerCancellation = this.cancelScheduler();
+    } catch (error) {
+      schedulerCancellation = Promise.reject(error);
+    }
+    const directOperations = [...this.directOperations];
+    const shutdownDrain = Promise.allSettled([schedulerCancellation, ...directOperations]);
+    this.lifecycle.abort(new DOMException('MarketService is disposing', 'AbortError'));
+    void (async () => {
+      let schedulerError: unknown;
+      let repositoryError: unknown;
+      const [schedulerResult] = await shutdownDrain;
+      if (schedulerResult?.status === 'rejected') schedulerError = schedulerResult.reason;
+      try {
+        this.repository.close();
+      } catch (error) {
+        repositoryError = error;
+      }
+      this.disposed = true;
+      this.disposing = false;
+      if (schedulerError !== undefined && repositoryError !== undefined) {
+        throw new AggregateError([schedulerError, repositoryError], 'MarketService disposal failed');
+      }
+      if (schedulerError !== undefined) throw schedulerError;
+      if (repositoryError !== undefined) throw repositoryError;
+    })().then(resolveDisposal, rejectDisposal);
+    return sharedDisposal;
+  }
+
+  private trackDirect<T>(requestSignal: AbortSignal | undefined, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    try {
+      this.assertUsable();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const controller = new AbortController();
+    const signals = [...new Set([this.lifecycle.signal, requestSignal].filter((item): item is AbortSignal => item !== undefined))];
+    const listeners: Array<{ signal: AbortSignal; listener: () => void }> = [];
+    for (const source of signals) {
+      if (source.aborted) {
+        controller.abort(abortReason(source));
+        break;
+      }
+      const listener = () => controller.abort(abortReason(source));
+      source.addEventListener('abort', listener, { once: true });
+      listeners.push({ signal: source, listener });
+    }
+    const cleanup = () => {
+      for (const { signal, listener } of listeners) signal.removeEventListener('abort', listener);
+    };
+    const tracked = Promise.resolve()
+      .then(() => {
+        throwIfAborted(controller.signal);
+        return operation(controller.signal);
+      })
+      .catch((error) => {
+        throw unwrapStorageFailure(error);
+      });
+    let drain!: Promise<void>;
+    drain = tracked.then(
+      () => {
+        cleanup();
+        this.directOperations.delete(drain);
+      },
+      () => {
+        cleanup();
+        this.directOperations.delete(drain);
+      },
+    );
+    this.directOperations.add(drain);
+    return tracked;
+  }
+
+  private acquireQuoteWrite(market: Market, tradingDate: string): QuoteWriteLease | null {
+    const key = `${market}:${tradingDate}`;
+    const state = this.quoteWriteStates.get(key) ?? { sealed: false, active: 0, waiters: new Set<() => void>() };
+    if (state.sealed) return null;
+    this.quoteWriteStates.set(key, state);
+    state.active++;
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      this.lifecycle.signal.removeEventListener('abort', release);
+      state.active--;
+      if (state.active < 0) throw new Error('quote writer lease count became negative');
+      if (state.active === 0) {
+        for (const waiter of [...state.waiters]) waiter();
+        if (!state.sealed && state.waiters.size === 0) this.quoteWriteStates.delete(key);
+      }
+    };
+    this.lifecycle.signal.addEventListener('abort', release, { once: true });
+    return { market, tradingDate, release };
+  }
+
+  private writeAdmittedQuotes(rows: CanonicalQuote[], prefetchLeases: ReadonlyMap<Market, QuoteWriteLease>): Set<string> {
+    const groups = new Map<string, { market: Market; tradingDate: string }>();
+    const rowGroups = new Map<CanonicalQuote, string>();
+    const representedDates = new Map<string, string>();
+    for (const row of rows) {
+      const representedTime = row.marketTime ?? row.fetchedAt;
+      let tradingDate = representedDates.get(representedTime);
+      if (tradingDate === undefined) {
+        tradingDate = shanghaiDate(representedTime);
+        representedDates.set(representedTime, tradingDate);
+      }
+      const key = `${row.market}:${tradingDate}`;
+      rowGroups.set(row, key);
+      if (!groups.has(key)) groups.set(key, { market: row.market, tradingDate });
+    }
+    const admittedGroups = new Set<string>();
+    const representedLeases: QuoteWriteLease[] = [];
+    try {
+      for (const [key, group] of groups) {
+        const prefetch = prefetchLeases.get(group.market);
+        if (prefetch?.tradingDate === group.tradingDate) {
+          admittedGroups.add(key);
+          continue;
+        }
+        const represented = this.acquireQuoteWrite(group.market, group.tradingDate);
+        if (!represented) continue;
+        representedLeases.push(represented);
+        admittedGroups.add(key);
+      }
+      const admitted = rows.filter((row) => admittedGroups.has(rowGroups.get(row)!));
+      if (admitted.length > 0) this.withStorageHealth(() => this.repository.writeBatch(admitted));
+      return new Set(admitted.map(({ symbol }) => symbol));
+    } finally {
+      for (const lease of representedLeases) lease.release();
+    }
+  }
+
+  private async sealQuoteWritesAndWait(market: Market, tradingDate: string, signal: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    const key = `${market}:${tradingDate}`;
+    const state = this.quoteWriteStates.get(key) ?? { sealed: false, active: 0, waiters: new Set<() => void>() };
+    this.quoteWriteStates.set(key, state);
+    state.sealed = true;
+    if (state.active === 0) return;
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const cleanup = (): void => {
+        state.waiters.delete(released);
+        signal.removeEventListener('abort', aborted);
+      };
+      const released = (): void => {
+        if (settled || state.active !== 0) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+      const aborted = (): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(abortReason(signal));
+      };
+      state.waiters.add(released);
+      signal.addEventListener('abort', aborted, { once: true });
+      released();
+    });
+  }
+
+  private async refreshQuotes(symbols: string[], requestSignal: AbortSignal): Promise<RefreshResult> {
+    if (symbols.length === 0) return { selected: new Map() };
+    const tencent = await this.fetchProviderQuotes('tencent', this.tencent, symbols, requestSignal);
+    const missingA = tencent.unresolved.filter((symbol) => canonicalizeSymbol(symbol).market === 'CN');
+    const sina = missingA.length > 0
+      ? await this.fetchProviderQuotes('sina', this.sina, missingA, requestSignal)
+      : { items: new Map<string, CanonicalQuote>(), unresolved: [] };
+    const selected = new Map<string, CanonicalQuote>();
+    for (const symbol of symbols) {
+      const item = tencent.items.get(symbol) ?? sina.items.get(symbol);
+      if (item) selected.set(symbol, { ...item, isStale: false });
+    }
+    return { selected };
+  }
+
+  private async fetchProviderQuotes(
+    providerName: 'tencent' | 'sina',
+    provider: Pick<MarketProvider, 'quotes'>,
+    symbols: string[],
+    requestSignal: AbortSignal,
+  ): Promise<ProviderQuoteFetch> {
+    const attempt = this.beginAttempt(providerName);
+    const items = new Map<string, CanonicalQuote>();
+    const categories: ErrorCategory[] = [];
+    let invalid = false;
+    for (const batch of marketBatches(symbols, this.config.providerBatchSize)) {
+      throwIfAborted(requestSignal);
+      try {
+        const response: QuoteResult = await provider.quotes(batch, requestSignal);
+        throwIfAborted(requestSignal);
+        if (!response || !isDenseArray(response.items)) throw new Error('invalid provider quote result');
+        const requested = new Set(batch);
+        for (const raw of response.items) {
+          try {
+            const item = canonicalQuote(raw, providerName);
+            if (!requested.has(item.symbol) || items.has(item.symbol)) throw new Error('unexpected provider quote symbol');
+            items.set(item.symbol, { ...item, isStale: false });
+          } catch {
+            invalid = true;
+          }
+        }
+      } catch (error) {
+        if (requestSignal.aborted) throw abortReason(requestSignal);
+        categories.push(isValidationFailure(error) ? 'validation' : errorCategory(error));
+      }
+    }
+    const unresolved = symbols.filter((symbol) => !items.has(symbol));
+    let category: ErrorCategory | null = null;
+    if (invalid && items.size === 0) category = 'validation';
+    else if (items.size > 0 && (invalid || categories.length > 0 || unresolved.length > 0)) category = 'partial';
+    else if (categories.length > 0) category = categories[0]!;
+    else if (unresolved.length > 0) category = 'partial';
+    this.finishAttempt(providerName, attempt, category, items.size > 0);
+    return { items, unresolved };
+  }
+
+  private cachedQuotes(symbols: string[]): Map<string, CanonicalQuote> {
+    const requested = new Set(symbols);
+    const result = new Map<string, CanonicalQuote>();
+    for (const raw of this.withStorageHealth(() => this.repository.latestQuotes(symbols))) {
+      const item = canonicalQuote(raw);
+      if (!requested.has(item.symbol) || result.has(item.symbol)) throw new Error('repository returned an unexpected quote');
+      result.set(item.symbol, item);
+    }
+    return result;
+  }
+
+  private withStorageHealth<T>(operation: () => T): T {
+    try {
+      return operation();
+    } catch (error) {
+      if (error instanceof StorageFailure) throw error;
+      this.recordStorageFailure();
+      throw new StorageFailure(error);
+    }
+  }
+
+  private readRepositoryHealth(): RepositoryHealth {
+    return this.withStorageHealth(() => this.repository.health());
+  }
+
+  private recordStorageFailure(): void {
+    const attempt = this.beginAttempt('storage');
+    const completed = this.now();
+    const previous = this.providerHealth.get('storage') ?? emptyProviderHealth('storage');
+    const current: ProviderServiceHealth = {
+      provider: 'storage',
+      available: false,
+      latencyMs: Math.max(0, completed.getTime() - attempt.startedAt),
+      lastAttemptAt: attempt.attemptedAt,
+      lastSuccessAt: previous.lastSuccessAt,
+      lastFailureAt: completed.toISOString(),
+      consecutiveFailures: previous.consecutiveFailures + 1,
+      errorCategory: 'storage',
+    };
+    this.appliedAttemptSequences.set('storage', attempt.sequence);
+    this.providerHealth.set('storage', current);
+    try {
+      this.repository.updateProviderHealth({
+        provider: current.provider,
+        available: current.available,
+        latencyMs: current.latencyMs,
+        lastAttemptAt: current.lastAttemptAt,
+        lastSuccessAt: current.lastSuccessAt,
+        lastFailureAt: current.lastFailureAt,
+        consecutiveFailures: current.consecutiveFailures,
+        error: current.errorCategory,
+      });
+    } catch {
+      // The in-memory health fact remains available when health persistence is itself unavailable.
+    }
+  }
+
+  private beginAttempt(provider: string): Attempt {
+    const sequence = (this.attemptSequences.get(provider) ?? 0) + 1;
+    this.attemptSequences.set(provider, sequence);
+    const now = this.now();
+    return { sequence, startedAt: now.getTime(), attemptedAt: now.toISOString() };
+  }
+
+  private finishAttempt(provider: string, attempt: Attempt, category: ErrorCategory | null, hadSuccess: boolean): void {
+    if (attempt.sequence < (this.appliedAttemptSequences.get(provider) ?? 0)) return;
+    const completed = this.now();
+    const previous = this.providerHealth.get(provider) ?? emptyProviderHealth(provider);
+    const success = category === null;
+    const current: ProviderServiceHealth = {
+      provider,
+      available: success,
+      latencyMs: Math.max(0, completed.getTime() - attempt.startedAt),
+      lastAttemptAt: attempt.attemptedAt,
+      lastSuccessAt: success || hadSuccess ? completed.toISOString() : previous.lastSuccessAt,
+      lastFailureAt: success ? previous.lastFailureAt : completed.toISOString(),
+      consecutiveFailures: success ? 0 : previous.consecutiveFailures + 1,
+      errorCategory: category,
+    };
+    this.appliedAttemptSequences.set(provider, attempt.sequence);
+    this.providerHealth.set(provider, current);
+    try {
+      this.repository.updateProviderHealth({
+        provider,
+        available: current.available,
+        latencyMs: current.latencyMs,
+        lastAttemptAt: current.lastAttemptAt,
+        lastSuccessAt: current.lastSuccessAt,
+        lastFailureAt: current.lastFailureAt,
+        consecutiveFailures: current.consecutiveFailures,
+        error: current.errorCategory,
+      });
+    } catch (error) {
+      this.recordStorageFailure();
+      throw new StorageFailure(error);
+    }
+  }
+
+  private now(): Date {
+    const now = this.clock.now();
+    if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new Error('MarketService clock returned an invalid date');
+    return new Date(now);
+  }
+
+  private assertUsable(): void {
+    if (this.disposed || this.disposing) throw new Error('MarketService is disposed');
+  }
+}
+
+function validatedConfig(config: MarketServiceConfig): Required<MarketServiceConfig> {
+  const providerBatchSize = config.providerBatchSize ?? DEFAULT_BATCH_SIZE;
+  if (!Number.isSafeInteger(providerBatchSize) || providerBatchSize < 1 || providerBatchSize > 100) {
+    throw new Error('providerBatchSize must be an integer from 1 to 100');
+  }
+  const quoteFreshnessMs = positiveSafeInteger(config.quoteFreshnessMs ?? DEFAULT_QUOTE_FRESHNESS_MS, 'quoteFreshnessMs');
+  const sectorFreshnessMs = positiveSafeInteger(config.sectorFreshnessMs ?? DEFAULT_SECTOR_FRESHNESS_MS, 'sectorFreshnessMs');
+  const conflictComparableWindowMs = positiveSafeInteger(config.conflictComparableWindowMs ?? DEFAULT_CONFLICT_WINDOW_MS, 'conflictComparableWindowMs');
+  const minuteRetentionTradingDays = config.minuteRetentionTradingDays ?? 30;
+  if (!Number.isSafeInteger(minuteRetentionTradingDays) || minuteRetentionTradingDays < 0) {
+    throw new Error('minuteRetentionTradingDays must be a non-negative safe integer');
+  }
+  const storageSoftLimitBytes = positiveSafeInteger(config.storageSoftLimitBytes ?? DEFAULT_MAX_BYTES, 'storageSoftLimitBytes');
+  return { providerBatchSize, quoteFreshnessMs, sectorFreshnessMs, conflictComparableWindowMs, minuteRetentionTradingDays, storageSoftLimitBytes };
+}
+
+function positiveSafeInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${label} must be a positive safe integer`);
+  return value;
+}
+
+function requestedSymbols(inputs: string[]): string[] {
+  if (!isDenseArray(inputs)) throw new Error('symbols must be a dense array');
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const input of inputs) {
+    if (typeof input !== 'string') throw new Error('symbols must contain strings');
+    const canonical = canonicalizeSymbol(input).symbol;
+    if (!seen.has(canonical)) {
+      seen.add(canonical);
+      result.push(canonical);
+    }
+  }
+  return result;
+}
+
+function canonicalWatchlist(inputs: string[]): string[] {
+  const result = requestedSymbols(inputs);
+  if (result.length !== inputs.length) throw new Error('Watchlist contains duplicate symbols');
+  if (result.length > 100) throw new Error('Watchlist cannot contain more than 100 symbols');
+  return result;
+}
+
+function mutateCanonicalWatchlist(current: string[], action: 'add' | 'remove', symbol: string): string[] {
+  const canonical = canonicalWatchlist(current);
+  const index = canonical.indexOf(symbol);
+  if (action === 'add') {
+    if (index >= 0) throw new Error(`${symbol} is already in the watchlist`);
+    if (canonical.length >= 100) throw new Error('Watchlist cannot contain more than 100 symbols');
+    return [...canonical, symbol];
+  }
+  if (index < 0) throw new Error(`${symbol} is not in the watchlist`);
+  return canonical.filter((item) => item !== symbol);
+}
+
+function cloneClosures(closures: UserState['closures']): MarketClosures {
+  return validateMarketClosures(closures);
+}
+
+function recoveryAnchor(providers: ProviderHealthUpdate[]): number | null {
+  const tencent = providers.find(({ provider }) => provider === 'tencent');
+  if (!tencent) return null;
+  const candidates = [tencent.lastAttemptAt, tencent.lastSuccessAt]
+    .filter((value): value is string => value !== null)
+    .map((value) => Date.parse(value))
+    .filter(Number.isFinite);
+  return candidates.length === 0 ? null : Math.max(...candidates);
+}
+
+function activeMarketIntervals(
+  start: Date,
+  end: Date,
+  market: Market,
+  closures: MarketClosures,
+): Array<{ start: string; end: string }> {
+  const intervals: Array<{ start: string; end: string }> = [];
+  let cursor = new Date(start);
+  while (cursor.getTime() < end.getTime() && intervals.length < MAX_RECOVERY_SEGMENTS) {
+    const boundary = nextStateChange(cursor, market, closures);
+    if (boundary.getTime() <= cursor.getTime()) throw new Error('market calendar did not advance during recovery');
+    const segmentEnd = new Date(Math.min(boundary.getTime(), end.getTime()));
+    if (marketState(cursor, closures)[market].active && segmentEnd.getTime() > cursor.getTime()) {
+      intervals.push({ start: cursor.toISOString(), end: segmentEnd.toISOString() });
+    }
+    cursor = boundary;
+  }
+  return intervals;
+}
+
+function quoteHistoryCapability(provider: MarketProvider, market: Market): ProviderHistoryCapability | null {
+  const capabilities = provider.historyCapabilities;
+  if (!isDenseArray(capabilities)) return null;
+  for (const capability of capabilities) {
+    if (!isPlainRecord(capability)
+      || capability.interval !== 'quote'
+      || !isDenseArray(capability.markets)
+      || !capability.markets.every((candidate) => candidate === 'CN' || candidate === 'HK')
+      || !Number.isSafeInteger(capability.maxItems)
+      || capability.maxItems < 1) continue;
+    if (capability.markets.includes(market)) return capability as ProviderHistoryCapability;
+  }
+  return null;
+}
+
+function canonicalHistoricalQuote(
+  raw: unknown,
+  expectedSource: string,
+  market: Market,
+  symbols: string[],
+  interval: { start: string; end: string },
+): CanonicalQuote {
+  const item = canonicalQuote(raw, expectedSource);
+  const representedAt = Date.parse(item.marketTime ?? item.fetchedAt);
+  if (item.market !== market || !symbols.includes(item.symbol)) throw new Error('unexpected provider history symbol');
+  if (representedAt < Date.parse(interval.start) || representedAt >= Date.parse(interval.end)) {
+    throw new Error('provider history item falls outside the requested interval');
+  }
+  return item;
+}
+
+function marketBatches(symbols: string[], size: number): string[][] {
+  const batches: string[][] = [];
+  for (const market of MARKETS) {
+    const selected = symbols.filter((symbol) => canonicalizeSymbol(symbol).market === market);
+    for (let index = 0; index < selected.length; index += size) batches.push(selected.slice(index, index + size));
+  }
+  return batches;
+}
+
+function canonicalQuote(value: unknown, expectedSource?: string): CanonicalQuote {
+  const record = plainRecord(value, 'quote');
+  const symbol = requiredString(record.symbol, 'quote symbol');
+  const canonical = canonicalizeSymbol(symbol);
+  if (canonical.symbol !== symbol) throw new Error('quote symbol must be canonical');
+  const market = requiredMarket(record.market, 'quote market');
+  if (canonical.market !== market) throw new Error('quote symbol does not match market');
+  const currency = record.currency;
+  if ((market === 'CN' && currency !== 'CNY') || (market === 'HK' && currency !== 'HKD')) throw new Error('quote currency does not match market');
+  const source = requiredString(record.source, 'quote source');
+  if (expectedSource !== undefined && source !== expectedSource) throw new Error('quote source does not match provider');
+  const marketTime = nullableString(record.marketTime, 'quote marketTime');
+  if (marketTime !== null) requireTimestamp(marketTime, 'quote marketTime');
+  const fetchedAt = requiredString(record.fetchedAt, 'quote fetchedAt');
+  requireTimestamp(fetchedAt, 'quote fetchedAt');
+  return {
+    symbol,
+    name: nullableString(record.name, 'quote name'),
+    market,
+    currency: currency as 'CNY' | 'HKD',
+    price: nullableFinite(record.price, 'quote price'),
+    open: nullableFinite(record.open, 'quote open'),
+    high: nullableFinite(record.high, 'quote high'),
+    low: nullableFinite(record.low, 'quote low'),
+    previousClose: nullableFinite(record.previousClose, 'quote previousClose'),
+    volume: nullableFinite(record.volume, 'quote volume'),
+    amount: nullableFinite(record.amount, 'quote amount'),
+    change: nullableFinite(record.change, 'quote change'),
+    changePercent: nullableFinite(record.changePercent, 'quote changePercent'),
+    marketTime,
+    fetchedAt,
+    source,
+    isDelayed: requiredBoolean(record.isDelayed, 'quote isDelayed'),
+    isStale: requiredBoolean(record.isStale, 'quote isStale'),
+  };
+}
+
+function canonicalBar(value: unknown, symbol: string, market: Market, interval: ServiceSeriesRequest['interval']): Bar {
+  const record = plainRecord(value, 'bar');
+  if (requiredString(record.symbol, 'bar symbol') !== symbol) throw new Error('bar symbol does not match request');
+  if (requiredMarket(record.market, 'bar market') !== market) throw new Error('bar market does not match request');
+  if (requiredString(record.interval, 'bar interval') !== interval) throw new Error('bar interval does not match request');
+  const timestamp = requiredString(record.timestamp, 'bar timestamp');
+  requireTimestamp(timestamp, 'bar timestamp');
+  return {
+    symbol,
+    market,
+    interval,
+    timestamp,
+    open: requiredFinite(record.open, 'bar open'),
+    high: requiredFinite(record.high, 'bar high'),
+    low: requiredFinite(record.low, 'bar low'),
+    close: requiredFinite(record.close, 'bar close'),
+    volume: nullableFinite(record.volume, 'bar volume'),
+    turnover: nullableFinite(record.turnover, 'bar turnover'),
+  };
+}
+
+function canonicalSector(value: unknown, expectedSource?: string): SectorObservation {
+  const record = plainRecord(value, 'sector');
+  const marketTime = nullableString(record.marketTime, 'sector marketTime');
+  if (marketTime !== null) requireTimestamp(marketTime, 'sector marketTime');
+  const fetchedAt = requiredString(record.fetchedAt, 'sector fetchedAt');
+  requireTimestamp(fetchedAt, 'sector fetchedAt');
+  const source = requiredString(record.source, 'sector source');
+  if (expectedSource !== undefined && source !== expectedSource) throw new Error('sector source does not match provider');
+  return {
+    id: requiredString(record.id, 'sector id'),
+    name: requiredString(record.name, 'sector name'),
+    category: requiredString(record.category, 'sector category'),
+    changePercent: nullableFinite(record.changePercent, 'sector changePercent'),
+    turnover: nullableFinite(record.turnover, 'sector turnover'),
+    netFlow: nullableFinite(record.netFlow, 'sector netFlow'),
+    leaderSymbol: nullableString(record.leaderSymbol, 'sector leaderSymbol'),
+    leaderName: nullableString(record.leaderName, 'sector leaderName'),
+    leaderChangePercent: nullableFinite(record.leaderChangePercent, 'sector leaderChangePercent'),
+    marketTime,
+    fetchedAt,
+    source,
+    isDelayed: requiredBoolean(record.isDelayed, 'sector isDelayed'),
+    isStale: requiredBoolean(record.isStale, 'sector isStale'),
+  };
+}
+
+function sourceConflict(first: CanonicalQuote, second: CanonicalQuote, windowMs: number, detectedAt: string): SourceConflict | null {
+  if (first.source === second.source || first.price === null || second.price === null || first.marketTime === null || second.marketTime === null) return null;
+  const firstTime = strictTimestamp(first.marketTime);
+  const secondTime = strictTimestamp(second.marketTime);
+  if (firstTime === null || secondTime === null || Math.abs(firstTime - secondTime) > windowMs) return null;
+  const preferred = first.source === 'tencent' ? first : second.source === 'tencent' ? second : first;
+  const alternate = preferred === first ? second : first;
+  const threshold = Math.max(0.01, Math.abs(preferred.price ?? 0) * 0.001);
+  if (Math.abs((preferred.price ?? 0) - (alternate.price ?? 0)) <= threshold) return null;
+  return {
+    symbol: preferred.symbol,
+    field: 'price',
+    observations: [
+      { source: preferred.source, marketTime: preferred.marketTime, value: preferred.price },
+      { source: alternate.source, marketTime: alternate.marketTime, value: alternate.price },
+    ],
+    detectedAt,
+  };
+}
+
+function newestMarketTime(items: CanonicalQuote[]): string | null {
+  let latest: { value: string; time: number } | null = null;
+  for (const item of items) {
+    if (item.marketTime === null) continue;
+    const time = strictTimestamp(item.marketTime);
+    if (time !== null && (latest === null || time > latest.time)) latest = { value: item.marketTime, time };
+  }
+  return latest?.value ?? null;
+}
+
+function availabilityFor(items: CanonicalQuote[], liveReturned: boolean): Availability {
+  if (items.length === 0) return 'unavailable';
+  if (items.some(({ isStale }) => isStale)) return 'stale';
+  return liveReturned ? 'live' : 'cached';
+}
+
+function unavailableQuotes(): QuotesResult {
+  return { availability: 'unavailable', items: [], conflicts: [] };
+}
+
+function isOlderThan(timestamp: string, now: Date, ageMs: number): boolean {
+  return now.getTime() - Date.parse(timestamp) > ageMs;
+}
+
+function compareTimestamp(left: Bar, right: Bar): number {
+  return Date.parse(left.timestamp) - Date.parse(right.timestamp) || left.timestamp.localeCompare(right.timestamp);
+}
+
+function compareSectors(
+  left: SectorObservation,
+  right: SectorObservation,
+  field: 'changePercent' | 'turnover' | 'netFlow',
+  direction: 'asc' | 'desc',
+): number {
+  const leftValue = left[field];
+  const rightValue = right[field];
+  if (leftValue === null && rightValue !== null) return 1;
+  if (leftValue !== null && rightValue === null) return -1;
+  if (leftValue !== null && rightValue !== null && leftValue !== rightValue) {
+    return direction === 'asc' ? leftValue - rightValue : rightValue - leftValue;
+  }
+  return left.category.localeCompare(right.category) || left.id.localeCompare(right.id) || left.source.localeCompare(right.source);
+}
+
+function sessionBounds(market: Market, phase: MarketPhase, minute: number): { start: string | null; end: string | null } {
+  if (market === 'CN' && phase === 'auction') return { start: '09:15', end: '09:30' };
+  if (market === 'HK' && phase === 'preopen') return { start: '09:00', end: '09:30' };
+  if (phase === 'continuous') {
+    if (market === 'CN') return minute < 12 * 60 ? { start: '09:30', end: '11:30' } : { start: '13:00', end: '15:00' };
+    return minute < 12 * 60 + 30 ? { start: '09:30', end: '12:00' } : { start: '13:00', end: '16:00' };
+  }
+  return { start: null, end: null };
+}
+
+function emptyProviderHealth(provider: string): ProviderServiceHealth {
+  return {
+    provider,
+    available: false,
+    latencyMs: null,
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastFailureAt: null,
+    consecutiveFailures: 0,
+    errorCategory: null,
+  };
+}
+
+function unwrapStorageFailure(error: unknown): unknown {
+  return error instanceof StorageFailure ? error.unwrap() : error;
+}
+
+function canonicalHealthValue<T>(value: T): T {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('health numeric fields must be finite');
+    return (Object.is(value, -0) ? 0 : value) as T;
+  }
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (isDenseArray(value)) return value.map((item) => canonicalHealthValue(item)) as T;
+  if (isPlainRecord(value)) {
+    const result: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) result[key] = canonicalHealthValue(item);
+    return result as T;
+  }
+  throw new Error('health must contain only lossless plain JSON values');
+}
+
+function serviceHealthFromStored(item: ProviderHealthUpdate): ProviderServiceHealth {
+  return {
+    provider: item.provider,
+    available: item.available,
+    latencyMs: item.latencyMs,
+    lastAttemptAt: item.lastAttemptAt,
+    lastSuccessAt: item.lastSuccessAt,
+    lastFailureAt: item.lastFailureAt,
+    consecutiveFailures: item.consecutiveFailures,
+    errorCategory: storedErrorCategory(item.error),
+  };
+}
+
+function storedErrorCategory(value: string | null): ErrorCategory | null {
+  if (value === null) return null;
+  return ['timeout', 'abort', 'http', 'decode', 'parse', 'storage', 'network', 'validation', 'partial', 'unknown'].includes(value)
+    ? value as ErrorCategory
+    : 'unknown';
+}
+
+function errorCategory(error: unknown): ErrorCategory {
+  const name = error instanceof Error ? error.name.toLowerCase() : '';
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  if (name.includes('timeout') || message.includes('timeout') || message.includes('timed out')) return 'timeout';
+  if (name.includes('abort') || message.includes('abort') || message.includes('cancel')) return 'abort';
+  if (message.includes('http') || message.includes('status')) return 'http';
+  if (message.includes('decode') || message.includes('encoding')) return 'decode';
+  if (message.includes('parse') || message.includes('json') || message.includes('response')) return 'parse';
+  if (message.includes('sqlite') || message.includes('database') || message.includes('storage') || message.includes('disk')) return 'storage';
+  if (message.includes('network') || message.includes('socket') || message.includes('fetch') || message.includes('offline')) return 'network';
+  return 'unknown';
+}
+
+function isValidationFailure(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith('invalid provider');
+}
+
+function isAlreadyRecordedSectorValidation(error: unknown): boolean {
+  return error instanceof Error && error.message === 'invalid Sina sector response';
+}
+
+function nonNegativeSafeIntegerOrNull(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? Object.is(value, -0) ? 0 : value as number : null;
+}
+
+function validatedLimit(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 10_000) throw new Error('limit must be an integer from 1 to 10000');
+  return value;
+}
+
+function validateInterval(value: unknown): asserts value is ServiceSeriesRequest['interval'] {
+  if (value !== 'minute' && value !== 'day' && value !== 'week' && value !== 'month') throw new Error('series interval is unsupported');
+}
+
+function validateMarket(value: unknown): asserts value is Market {
+  if (value !== 'CN' && value !== 'HK') throw new Error('market must be CN or HK');
+}
+
+function requireTradingDate(value: string): void {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error('closed trading date must be YYYY-MM-DD');
+  const [year, month, day] = value.split('-').map(Number);
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() + 1 !== month || parsed.getUTCDate() !== day) {
+    throw new Error('closed trading date must be a valid calendar date');
+  }
+}
+
+function requireTimestamp(value: string, label: string): void {
+  if (strictTimestamp(value) === null) throw new Error(`${label} must be a valid ISO timestamp`);
+}
+
+function strictTimestamp(value: string): number | null {
+  const match = TIMESTAMP.exec(value);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const zone = match[8]!;
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month) || hour > 23 || minute > 59 || second > 59) return null;
+  const offset = offsetMinutes(zone);
+  const timestamp = Date.parse(value);
+  if (offset === null || !Number.isFinite(timestamp)) return null;
+  const represented = new Date(timestamp + offset * 60_000);
+  if (represented.getUTCFullYear() !== year || represented.getUTCMonth() + 1 !== month || represented.getUTCDate() !== day
+    || represented.getUTCHours() !== hour || represented.getUTCMinutes() !== minute || represented.getUTCSeconds() !== second) return null;
+  return timestamp;
+}
+
+function offsetMinutes(zone: string): number | null {
+  if (zone === 'Z') return 0;
+  const hour = Number(zone.slice(1, 3));
+  const minute = Number(zone.slice(4, 6));
+  if (hour > 23 || minute > 59) return null;
+  return (zone[0] === '+' ? 1 : -1) * (hour * 60 + minute);
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+function plainRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!isPlainRecord(value)) throw new Error(`${label} must be a plain object`);
+  return value;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function isDenseArray(value: unknown): value is unknown[] {
+  return Array.isArray(value) && Object.getPrototypeOf(value) === Array.prototype && Object.keys(value).length === value.length;
+}
+
+function requiredString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.trim() === '') throw new Error(`${label} must be a non-empty string`);
+  return value;
+}
+
+function nullableString(value: unknown, label: string): string | null {
+  if (value !== null && typeof value !== 'string') throw new Error(`${label} must be a string or null`);
+  return value;
+}
+
+function requiredFinite(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${label} must be finite`);
+  return Object.is(value, -0) ? 0 : value;
+}
+
+function nullableFinite(value: unknown, label: string): number | null {
+  if (value === null) return null;
+  return requiredFinite(value, label);
+}
+
+function requiredBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== 'boolean') throw new Error(`${label} must be boolean`);
+  return value;
+}
+
+function requiredMarket(value: unknown, label: string): Market {
+  if (value !== 'CN' && value !== 'HK') throw new Error(`${label} must be CN or HK`);
+  return value;
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw abortReason(signal);
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
+}

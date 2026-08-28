@@ -1,0 +1,14 @@
+node_modules/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.planning/
+.env
+.env.*
+!.env.example
+coverage/
+*.log
+*.tgz
+.npm-cache/
+.DS_Store
+Thumbs.db

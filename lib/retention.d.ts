@@ -1,0 +1,34 @@
+import { type MarketClosures } from './calendar.js';
+import type { Market } from './model.js';
+import { MarketRepository } from './repository.js';
+export declare const MEBIBYTE = 1048576;
+export declare const DEFAULT_MAX_BYTES: number;
+export type RetentionPolicy = {
+    market?: Market;
+    closedTradingDate?: string;
+    closures?: MarketClosures;
+    minuteTradingDays?: number;
+    maxBytes?: number;
+    databaseBytes?: () => number;
+};
+export type MaintenanceResult = {
+    runAt: string;
+    completedAt: string;
+    compactedTradingDates: string[];
+    compactedRawRows: number;
+    createdMinuteBars: number;
+    createdDailyBars: number;
+    createdDailySectorSummaries: number;
+    deletedRawRows: number;
+    expiredMinuteTradingDates: string[];
+    expiredMinuteRows: number;
+    prunedMinuteTradingDates: string[];
+    prunedMinuteRows: number;
+    prunedSectorBuckets: string[];
+    prunedSectorRows: number;
+    bytesBefore: number;
+    bytesAfter: number;
+    maxBytes: number;
+    capSatisfied: boolean;
+};
+export declare function maintainRepository(repository: MarketRepository, policy: RetentionPolicy | undefined, now: Date): MaintenanceResult;
