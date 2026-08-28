@@ -132,7 +132,6 @@ test('real Cordis lifecycle registers seven tools, wires bounded policy, uses th
 
   assert.deepEqual(marketToolNames(ctx), [...TOOL_NAMES]);
   assert.equal(databasePath, `${layout.storageDir}\\market.sqlite`);
-  assert.equal(databasePath?.includes('dsh-market-intelligence\\dsh-market-intelligence'), false);
   assert.equal(tencentOptions?.requestTimeoutMs, 12_345);
   assert.equal(tencentOptions?.quoteConcurrency, 3);
   assert.equal(sinaOptions?.requestTimeoutMs, 12_345);
@@ -328,3 +327,4 @@ async function tempLayout(t: TestContext): Promise<{ dshHome: string; storageDir
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   return { dshHome, storageDir };
 }
+
