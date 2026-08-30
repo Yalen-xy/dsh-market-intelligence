@@ -8,6 +8,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools';
 import { MarketRepository } from '../src/repository.ts';
 import { MarketScheduler } from '../src/scheduler.ts';
 import { MarketService } from '../src/service.ts';
+import { assertSafeLocalWindowsPath } from '../src/paths.ts';
 import { FakeClock, atShanghai } from './helpers.ts';
 import * as plugin from '../src/index.ts';
 
@@ -62,7 +63,9 @@ test('package metadata and bundle patch expose exactly one host-plane row', asyn
     './cordis.patch.yml': './cordis.patch.yml',
     './package.json': './package.json',
   });
-  assert.deepEqual(packageJson.files, ['lib', 'cordis.patch.yml', 'README.md', 'scripts']);
+  assert.equal(packageJson.license, 'SEE LICENSE IN LICENSE');
+  assert.equal(packageJson.private, true);
+  assert.deepEqual(packageJson.files, ['lib', 'cordis.patch.yml', 'README.md', 'LICENSE', 'docs/INSTALL.md', 'scripts']);
   assert.equal(packageJson.dsh?.bundle?.patch, './cordis.patch.yml');
   assert.equal(packageJson.devDependencies?.['@deepseek-ai/dsh-system-prompt'], '^0.1.0-rc.8');
 
@@ -73,7 +76,6 @@ test('package metadata and bundle patch expose exactly one host-plane row', asyn
     '    - id: market-intelligence',
     '      name: dsh-market-intelligence',
     '      config:',
-    "        storageDir: 'D:\\AI\\dsh\\storages\\dsh-market-intelligence'",
     '        quoteIntervalMs: 10000',
     '        sectorIntervalMs: 60000',
     '        sectorPersistIntervalMs: 300000',
@@ -93,6 +95,7 @@ test('real Cordis lifecycle registers seven tools, wires bounded policy, uses th
   let serviceOptions: Record<string, unknown> | undefined;
   const custom = pluginWith(plugin.createApply({
     getDshHome: () => layout.dshHome,
+    assertSafePath: async () => {},
     clock,
     openRepository(file: string) {
       databasePath = file;
@@ -170,6 +173,33 @@ test('plugin load rejects a missing DSH_HOME before creating storage or network 
   await fiber.dispose();
 });
 
+test('plugin load rejects non-local DSH_HOME forms before any startup side effect', async () => {
+  const invalidHomes = [
+    '.\\dsh',
+    '\\\\server\\share\\dsh',
+    '\\\\?\\C:\\dsh',
+    'C:\\safe\\..\\dsh',
+  ];
+
+  for (const dshHome of invalidHomes) {
+    const sideEffects: string[] = [];
+    const customApply = plugin.createApply({
+      getDshHome: () => dshHome,
+      assertSafePath: async () => { sideEffects.push('safe-path'); },
+      mkdir: async () => { sideEffects.push('mkdir'); },
+      openRepository: () => { sideEffects.push('repository'); throw new Error('repository must not open'); },
+      createTencent: () => { sideEffects.push('provider'); throw new Error('provider must not start'); },
+    });
+    const ctx = { effect: async (callback: () => Promise<unknown>) => callback() } as never;
+
+    await assert.rejects(
+      customApply(ctx, validConfig('D:\\AI\\dsh\\storages\\dsh-market-intelligence')),
+      /local Windows path/i,
+    );
+    assert.deepEqual(sideEffects, []);
+  }
+});
+
 test('plugin load rejects every out-of-bounds or security-expanding config before startup', async (t) => {
   const ctx = await runtimeContext(t);
   let startupCalls = 0;
@@ -179,7 +209,10 @@ test('plugin load rejects every out-of-bounds or security-expanding config befor
   }));
   const root = 'D:\\AI\\dsh\\storages\\dsh-market-intelligence';
   const invalid: Array<[string, Record<string, unknown>]> = [
-    ['storage drive', { storageDir: 'C:\\runtime\\dsh-market-intelligence' }],
+    ['relative storage directory', { storageDir: '.\\dsh-market-intelligence' }],
+    ['UNC storage directory', { storageDir: '\\\\server\\share\\dsh-market-intelligence' }],
+    ['device storage directory', { storageDir: '\\\\?\\C:\\runtime\\dsh-market-intelligence' }],
+    ['traversing storage directory', { storageDir: 'C:\\runtime\\..\\dsh-market-intelligence' }],
     ['timeout low', { requestTimeoutMs: 99 }],
     ['timeout high', { requestTimeoutMs: 120_001 }],
     ['batch zero', { providerBatchSize: 0 }],
@@ -211,6 +244,71 @@ test('plugin load rejects every out-of-bounds or security-expanding config befor
   assert.equal(startupCalls, 0);
 });
 
+test('plugin starts and releases cleanly after C, D, and other fixed-drive roots pass safety checks', async () => {
+  const cases = [
+    ['C:\\Users\\张三\\.dsh', undefined, 'C:\\Users\\张三\\.dsh\\storages\\dsh-market-intelligence'],
+    ['D:\\AI\\dsh', undefined, 'D:\\AI\\dsh\\storages\\dsh-market-intelligence'],
+    ['Z:\\Research Data\\dsh', 'E:\\Storage\\dsh-market-intelligence', 'E:\\Storage\\dsh-market-intelligence'],
+  ] as const;
+
+  for (const [dshHome, storageDir, expectedRoot] of cases) {
+    const checked: string[] = [];
+    const events: string[] = [];
+    const customApply = plugin.createApply({
+      getDshHome: () => dshHome,
+      assertSafePath: async (current: string) => {
+        await assertSafeLocalWindowsPath(current, {
+          getDriveTypeImpl: async () => 3,
+          lstatImpl: async () => {
+            const error = Object.assign(new Error('missing'), { code: 'ENOENT' });
+            throw error;
+          },
+        });
+        checked.push(current);
+      },
+      mkdir: async () => { events.push('mkdir'); },
+      loadUserState: async () => { events.push('load state'); return { watchlist: [], closures: {} }; },
+      openRepository: () => { events.push('open repository'); return { close() { events.push('close repository'); } } as never; },
+      createTencent: () => { events.push('create Tencent'); return quietTencent as never; },
+      createSina: () => { events.push('create Sina'); return quietSina as never; },
+      createScheduler: () => { events.push('create scheduler'); return {} as never; },
+      createService: () => ({ async dispose() { events.push('dispose service'); } }) as never,
+      registerTools: () => {
+        events.push('register tools');
+        return () => events.push('unregister tools');
+      },
+    });
+    const ctx = { effect: async (callback: () => Promise<unknown>) => callback() } as never;
+    const config = validConfig(storageDir ?? expectedRoot);
+    if (storageDir === undefined) delete config.storageDir;
+
+    const dispose = await customApply(ctx, config);
+    assert.deepEqual(checked, [dshHome, expectedRoot]);
+    assert.deepEqual(events, [
+      'mkdir',
+      'load state',
+      'open repository',
+      'create Tencent',
+      'create Sina',
+      'create scheduler',
+      'register tools',
+    ]);
+
+    await dispose();
+    assert.deepEqual(events, [
+      'mkdir',
+      'load state',
+      'open repository',
+      'create Tencent',
+      'create Sina',
+      'create scheduler',
+      'register tools',
+      'unregister tools',
+      'dispose service',
+    ]);
+  }
+});
+
 test('partial startup failures unwind only resources already acquired at every stage', async (t) => {
   const stages = ['mkdir', 'loadUserState', 'openRepository', 'createTencent', 'createSina', 'createScheduler', 'createService', 'registerTools'] as const;
   const expectedCleanup: Record<typeof stages[number], string[]> = {
@@ -234,6 +332,7 @@ test('partial startup failures unwind only resources already acquired at every s
     const service = { async dispose() { cleanup.push('service-dispose'); } };
     const custom = pluginWith(plugin.createApply({
       getDshHome: () => 'D:\\AI\\dsh',
+      assertSafePath: async () => {},
       mkdir: async () => { fail('mkdir'); },
       loadUserState: async () => { fail('loadUserState'); return { watchlist: [], closures: {} }; },
       openRepository: () => { fail('openRepository'); return repository as never; },
@@ -256,6 +355,7 @@ test('the single Cordis lifecycle disposer is idempotent and aggregates tool and
   const events: string[] = [];
   const customApply = plugin.createApply({
     getDshHome: () => 'D:\\AI\\dsh',
+    assertSafePath: async () => {},
     mkdir: async () => {},
     loadUserState: async () => ({ watchlist: [], closures: {} }),
     openRepository: () => ({ close() { events.push('repository-close'); } }) as never,
@@ -327,4 +427,3 @@ async function tempLayout(t: TestContext): Promise<{ dshHome: string; storageDir
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   return { dshHome, storageDir };
 }
-

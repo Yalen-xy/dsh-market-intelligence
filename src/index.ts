@@ -2,7 +2,6 @@ import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type Schema from '@deepseek-ai/schemastery';
 import { mkdir } from 'node:fs/promises';
-import path from 'node:path';
 import { SharedRequestLimiter } from './http.js';
 import {
   loadUserState,
@@ -19,6 +18,7 @@ import { MarketRepository } from './repository.js';
 import { MarketScheduler, type Clock, type MarketSchedulerOptions } from './scheduler.js';
 import { MarketService, type MarketServiceOptions, type ServiceRepository, type ServiceScheduler } from './service.js';
 import { registerMarketTools, type MarketToolsService } from './tools.js';
+import { assertSafeLocalWindowsPath, requireLocalWindowsPath } from './paths.js';
 
 export const name = 'market-intelligence';
 export const inject = ['tools'];
@@ -78,6 +78,7 @@ type SinaMarketProvider = Pick<MarketProvider, 'quotes'> & {
 
 export type PluginDependencies = {
   getDshHome(): string | undefined;
+  assertSafePath(pathValue: string): Promise<void>;
   mkdir(directory: string, options: { recursive: true }): Promise<unknown>;
   loadUserState(paths: RuntimePaths): Promise<UserState>;
   mutateWatchlist(paths: RuntimePaths, mutation: WatchlistMutation): Promise<UserState>;
@@ -98,6 +99,7 @@ const systemClock: Clock = {
 
 const defaultDependencies: PluginDependencies = {
   getDshHome: () => process.env.DSH_HOME,
+  assertSafePath: assertSafeLocalWindowsPath,
   mkdir,
   loadUserState,
   mutateWatchlist,
@@ -116,6 +118,8 @@ export function createApply(overrides: Partial<PluginDependencies> = {}) {
     const config = Config(rawConfig);
     const dshHome = requireDshHome(dependencies.getDshHome());
     const paths = resolveRuntimePaths(dshHome, config.storageDir);
+    await dependencies.assertSafePath(dshHome);
+    await dependencies.assertSafePath(paths.root);
     return ctx.effect(
       async () => startLifecycle(ctx, config, paths, dependencies),
       'market-intelligence lifecycle',
@@ -251,26 +255,13 @@ function validateConfig(value: Record<string, unknown>): RuntimeConfig {
 }
 
 function requireDshHome(value: unknown): string {
-  if (typeof value !== 'string' || value.trim() === '') throw new Error('DSH_HOME must be a non-empty absolute D-drive path');
-  return requireAbsoluteDPath(value, 'DSH_HOME');
+  if (typeof value !== 'string' || value.trim() === '') throw new Error('DSH_HOME must be a non-empty normalized absolute local Windows path');
+  return requireLocalWindowsPath(value, 'DSH_HOME');
 }
 
 function requireStorageDir(value: unknown): string {
-  if (typeof value !== 'string' || value.trim() === '') throw new Error('storageDir must be a non-empty absolute D-drive path');
-  const normalized = requireAbsoluteDPath(value, 'storageDir');
-  if (path.win32.basename(normalized).toLowerCase() !== 'dsh-market-intelligence') {
-    throw new Error('storageDir must be the final dsh-market-intelligence plugin root');
-  }
-  return normalized;
-}
-
-function requireAbsoluteDPath(value: string, label: string): string {
-  if (!path.win32.isAbsolute(value) || path.win32.parse(value).root.toUpperCase() !== 'D:\\') {
-    throw new Error(`${label} must be an absolute D-drive path`);
-  }
-  const normalized = path.win32.normalize(value);
-  if (normalized !== value) throw new Error(`${label} must be a normalized path`);
-  return normalized;
+  if (typeof value !== 'string' || value.trim() === '') throw new Error('storageDir must be a non-empty normalized absolute local Windows path');
+  return requireLocalWindowsPath(value, 'storageDir', 'dsh-market-intelligence');
 }
 
 function requireBoundedInteger(value: unknown, minimum: number, maximum: number, label: string): number {

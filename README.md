@@ -6,6 +6,122 @@
 
 它不是交易系统：不做估值、选股、评分或投资建议，不登录券商，不读取账户/持仓，不下单，也不提供模拟下单或自动交易。唯一会改变本地状态的模型可见操作是维护本插件自己的观察列表。插件与 `dsh-stock-watch` 没有运行时或数据依赖；安装、升级或移除本插件都不应修改它。
 
+## 一键安装
+
+要求 Windows PowerShell 5.1 或 PowerShell 7、Node.js `^22.19.0 || >=24.0.0`，以及可验证、支持 `plugin add/remove` 的 DSH Desktop 受管 CLI。开始前请正常退出 DSH Desktop；若检测到属于该 DSH 安装或 profile 的进程，安装器会拒绝继续，不会强制结束进程。
+
+以下命令接受本项目的[个人非商业有限使用许可](LICENSE)，把 `install.ps1` 和 `SHA256SUMS.txt` 下载到新的唯一临时目录，严格验证 manifest 恰好描述当前版本的四个 Release payload，再核对 `install.ps1` 的 SHA-256；只有全部通过后才用调用运算符 `&` 执行脚本。它不使用动态表达式执行。安装器随后还会独立校验下载的 npm tarball，因此 bootstrap 校验不会绕过 payload 校验。
+
+### 最新稳定版
+
+```powershell
+& {
+  $ErrorActionPreference = 'Stop'
+  $api = 'https://api.github.com/repos/Yalen-xy/dsh-market-intelligence/releases/latest'
+  $release = Invoke-RestMethod -Uri $api
+  $tag = [string]$release.tag_name
+  if ($tag -cnotmatch '\Av(?<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\z') { throw 'Latest Release tag is not stable semantic version.' }
+  $version = [string]$Matches.version
+  $base = "https://github.com/Yalen-xy/dsh-market-intelligence/releases/download/$tag"
+  $temp = Join-Path ([IO.Path]::GetTempPath()) ('dsh-market-installer-' + [guid]::NewGuid().ToString('D'))
+  New-Item -ItemType Directory -Path $temp -ErrorAction Stop | Out-Null
+  try {
+    $installer = Join-Path $temp 'install.ps1'
+    $manifest = Join-Path $temp 'SHA256SUMS.txt'
+    Invoke-WebRequest -UseBasicParsing -Uri "$base/install.ps1" -OutFile $installer
+    Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS.txt" -OutFile $manifest
+    $expectedNames = @('install.ps1', 'uninstall.ps1', "dsh-market-intelligence-$version.tgz", 'LICENSE.txt')
+    $expectedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $seenNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $seenHashes = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $entries = [ordered]@{}
+    foreach ($name in $expectedNames) { [void]$expectedSet.Add($name) }
+    foreach ($line in [IO.File]::ReadAllLines($manifest)) {
+      if ($line.Length -eq 0) { continue }
+      $match = [regex]::Match($line, '\A(?<hash>[0-9a-f]{64})  (?<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\z', [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+      if (-not $match.Success) { throw 'Manifest contains a malformed row.' }
+      $name = $match.Groups['name'].Value
+      $hash = $match.Groups['hash'].Value
+      if (-not $seenNames.Add($name)) { throw 'Manifest contains a duplicate file name.' }
+      if (-not $expectedSet.Contains($name)) { throw 'Manifest contains an unexpected file name.' }
+      if (-not $seenHashes.Add($hash)) { throw 'Manifest contains a duplicate hash.' }
+      $entries[$name] = $hash
+    }
+    if ($entries.Count -ne $expectedNames.Count) { throw 'Manifest does not contain the exact Release payload set.' }
+    foreach ($name in $expectedNames) { if (-not $entries.Contains($name)) { throw 'Manifest is missing a Release payload.' } }
+    $stream = [IO.File]::OpenRead($installer)
+    try {
+      $sha256 = [Security.Cryptography.SHA256]::Create()
+      try { $actual = ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+      finally { $sha256.Dispose() }
+    }
+    finally { $stream.Dispose() }
+    if (-not [string]::Equals($actual, [string]$entries['install.ps1'], [StringComparison]::Ordinal)) { throw 'install.ps1 SHA-256 mismatch.' }
+    & $installer -Version $version -ReleaseApiUri $api -AcceptLicense
+    if (-not $?) { throw 'Installer failed.' }
+  }
+  finally {
+    if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
+  }
+}
+```
+
+### 固定版本 v0.1.0
+
+固定版本同时固定 Release 下载 URL 和 API URL，避免以后最新版本变化时 tarball 与版本参数错配。
+
+```powershell
+& {
+  $ErrorActionPreference = 'Stop'
+  $tag = 'v0.1.0'
+  $version = '0.1.0'
+  $api = 'https://api.github.com/repos/Yalen-xy/dsh-market-intelligence/releases/tags/v0.1.0'
+  $base = 'https://github.com/Yalen-xy/dsh-market-intelligence/releases/download/v0.1.0'
+  $temp = Join-Path ([IO.Path]::GetTempPath()) ('dsh-market-installer-' + [guid]::NewGuid().ToString('D'))
+  New-Item -ItemType Directory -Path $temp -ErrorAction Stop | Out-Null
+  try {
+    $installer = Join-Path $temp 'install.ps1'
+    $manifest = Join-Path $temp 'SHA256SUMS.txt'
+    Invoke-WebRequest -UseBasicParsing -Uri "$base/install.ps1" -OutFile $installer
+    Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS.txt" -OutFile $manifest
+    $expectedNames = @('install.ps1', 'uninstall.ps1', "dsh-market-intelligence-$version.tgz", 'LICENSE.txt')
+    $expectedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $seenNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $seenHashes = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $entries = [ordered]@{}
+    foreach ($name in $expectedNames) { [void]$expectedSet.Add($name) }
+    foreach ($line in [IO.File]::ReadAllLines($manifest)) {
+      if ($line.Length -eq 0) { continue }
+      $match = [regex]::Match($line, '\A(?<hash>[0-9a-f]{64})  (?<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\z', [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+      if (-not $match.Success) { throw 'Manifest contains a malformed row.' }
+      $name = $match.Groups['name'].Value
+      $hash = $match.Groups['hash'].Value
+      if (-not $seenNames.Add($name)) { throw 'Manifest contains a duplicate file name.' }
+      if (-not $expectedSet.Contains($name)) { throw 'Manifest contains an unexpected file name.' }
+      if (-not $seenHashes.Add($hash)) { throw 'Manifest contains a duplicate hash.' }
+      $entries[$name] = $hash
+    }
+    if ($entries.Count -ne $expectedNames.Count) { throw 'Manifest does not contain the exact Release payload set.' }
+    foreach ($name in $expectedNames) { if (-not $entries.Contains($name)) { throw 'Manifest is missing a Release payload.' } }
+    $stream = [IO.File]::OpenRead($installer)
+    try {
+      $sha256 = [Security.Cryptography.SHA256]::Create()
+      try { $actual = ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+      finally { $sha256.Dispose() }
+    }
+    finally { $stream.Dispose() }
+    if (-not [string]::Equals($actual, [string]$entries['install.ps1'], [StringComparison]::Ordinal)) { throw 'install.ps1 SHA-256 mismatch.' }
+    & $installer -Version $version -ReleaseApiUri $api -AcceptLicense
+    if (-not $?) { throw 'Installer failed.' }
+  }
+  finally {
+    if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
+  }
+}
+```
+
+若自动发现不到唯一 DSH home，请下载并验证脚本后在最后一行加入类似 `-DshHome 'E:\Applications\dsh-data'`；若受管 CLI 不在可信的自动发现位置，再显式提供 `-DshCommand`。完整的参数、手动下载、升级、降级、卸载、回滚与重启验证见[安装与恢复指南](docs/INSTALL.md)。
+
 ## 功能概览
 
 - A 股和港股交易阶段、集合竞价/开市前时段与交易日历状态。
@@ -22,6 +138,7 @@
 | --- | --- |
 | [工具参考](docs/TOOLS.md) | 七个工具的用途、参数、示例和符号格式 |
 | [架构说明](docs/ARCHITECTURE.md) | 数据流、模块职责、存储、安全和恢复设计 |
+| [安装指南](docs/INSTALL.md) | 校验安装、升级、降级、卸载、回滚与验证 |
 | [安全策略](SECURITY.md) | 安全边界和漏洞报告方式 |
 | [变更日志](CHANGELOG.md) | 版本功能和重要变更 |
 | `src/` | TypeScript 源码 |
@@ -31,11 +148,13 @@
 
 ## 数据源、时效与许可限制
 
+> Use is limited to personal, non-commercial, read-only research. Tencent and Sina are not partners of, and have not authorized, this project. Their unofficial interfaces may change, fail, or become unavailable without notice. You are responsible for compliance with applicable law and upstream terms. Nothing in this project or License grants third-party authorization or guarantees legal compliance.
+
 - 腾讯财经是行情快照、指数、分钟线和前复权 K 线的首选来源；请求限于 `web.ifzq.gtimg.cn` 与 `smartbox.gtimg.cn` 的已审查固定路径。
 - 新浪财经仅作为 A 股快照后备，并提供行业和概念板块数据；请求限于 `hq.sinajs.cn`、`money.finance.sina.com.cn` 与 `vip.stock.finance.sina.com.cn` 的已审查固定路径。
 - 工具结果中的 `source` 表示实际来源，`marketTime` 是市场数据所代表的时间，`fetchedAt` 是本机获取时间；`isDelayed` 和 `isStale` 分别表示已知/检测到的延迟与陈旧状态。缺失字段为 `null`，不会伪装成 0。
 - 这些是可能变更、限流、延迟、停用或改变格式的公开端点。插件不承诺免费、实时、连续可用或任何固定延迟，也不保证数据完整、准确或适合交易。
-- 本仓库的 `UNLICENSED` 标记以及插件代码均不授予腾讯、新浪或交易所数据的再分发/商业使用许可。使用者必须自行确认其地区、用途和数据源条款允许使用。
+- 软件许可只允许未修改的官方 Release 用于个人、非商业、只读研究；它不是投资建议。本项目没有获得腾讯或新浪授权，也不授予任何第三方数据权利。使用者必须自行确认其地区、用途和数据源条款允许使用。
 
 ## 市场阶段与采集节奏
 
@@ -88,13 +207,7 @@
 
 观察列表在 A 股和港股之间合计最多 100 只证券；工具会规范化代码并确定性拒绝重复项。固定指数由插件额外采集，不占用户观察列表条目。
 
-桌面 bundle 的默认运行目录是：
-
-```text
-D:\AI\dsh\storages\dsh-market-intelligence
-```
-
-`D:\AI\dsh-tools\bin\dsh.ps1` 会把 `DSH_HOME` 设置为 `D:\AI\dsh`。未显式配置 `storageDir` 时，插件使用 `%DSH_HOME%\storages\dsh-market-intelligence`；`DSH_HOME` 和 `storageDir` 都必须是规范化的 D 盘绝对路径，后者必须以 `dsh-market-intelligence` 作为最终目录名。该目录保存：
+未显式配置 `storageDir` 时，插件使用 `%DSH_HOME%\storages\dsh-market-intelligence`。`DSH_HOME` 和显式 `storageDir` 可以位于任意本地固定磁盘，但必须是规范化的 Windows 绝对路径；网络、UNC、设备、可移动磁盘、路径穿越和未解决的 reparse-point 路径会被拒绝。显式存储目录必须以 `dsh-market-intelligence` 作为最终目录名。该目录保存：
 
 - `config.json`：观察列表和按年度划分的 CN/HK 休市日；原子替换写入。
 - `market.sqlite`（以及 SQLite 可能创建的 `-wal`/`-shm`）：行情、板块、健康和维护记录。
@@ -109,7 +222,7 @@ DSH 停机期间不采集。插件启动时若存在上次持久化的 Tencent �
 
 | 字段 | 默认值 | 有效范围/约束 |
 | --- | ---: | --- |
-| `storageDir` | `%DSH_HOME%\storages\dsh-market-intelligence`；bundle 固定为上述 D 盘路径 | 规范化 D 盘绝对路径，最终目录必须为 `dsh-market-intelligence` |
+| `storageDir` | `%DSH_HOME%\storages\dsh-market-intelligence` | 任意本地固定磁盘上的规范化绝对路径，最终目录必须为 `dsh-market-intelligence` |
 | `requestTimeoutMs` | `10000` | 整数 `100–120000` |
 | `providerBatchSize` | `100` | 整数 `1–100` |
 | `providerConcurrency` | `4` | 整数 `1–16`；跨并行工具调用、Tencent/Sina 与其所有物理 HTTP 请求共享 |
@@ -136,33 +249,20 @@ DSH 停机期间不采集。插件启动时若存在上次持久化的 Tencent �
 
 `closures` 只允许四位年份键，每个年份对象必须恰好包含 `CN` 和 `HK`；日期必须是规范真实日期、必须属于外层年份、同一市场内不得重复。CN 与 HK 可以在同一天同时休市，显式空数组年份也是有效配置。
 
-## 验证、安装、升级与移除
+## 验证、升级与移除
 
-要求 Node.js `^22.19.0 || >=24.0.0`，并需要运行时 `node:sqlite`。以下命令均从本项目目录执行；keyless 验证不会访问腾讯或新浪：
+要求 Node.js `^22.19.0 || >=24.0.0`，并需要运行时 `node:sqlite`。源码贡献者可在任意 checkout 根目录运行以下 keyless 验证；这些命令不会访问腾讯或新浪：
 
 ```powershell
-Set-Location 'D:\AI\dsh-market-intelligence'
 npm ci
 npm test
 npm run build
 npm run test:load
 npm run test:load-profile
-npm pack --dry-run
+npm pack --dry-run --ignore-scripts
 ```
 
-安装或升级前必须由用户正常退出 DSH Desktop，并确认没有 DSH 所属的 Electron/Node 进程；不要自动杀进程。通过管理式 desktop profile 安装本地 checkout，不要手工编辑 profile 的 `package.json` 或 lockfile：
-
-```powershell
-& 'D:\AI\dsh-tools\bin\dsh.ps1' plugin --profile desktop add .
-```
-
-升级时先切换到已审查的目标提交，重新运行全部 keyless 验证，再重复同一个 `add .` 命令进行管理式协调。移除 bundle 也必须在 DSH 完全停止后通过管理命令完成：
-
-```powershell
-& 'D:\AI\dsh-tools\bin\dsh.ps1' plugin --profile desktop remove dsh-market-intelligence
-```
-
-移除 package 不会自动删除运行数据；备份或删除存储目录是独立、显式的用户决定。不要在本流程中删除 `dsh-stock-watch`。本机 `dsh.ps1` 固定使用 DSH Desktop 2.0.3 自带的受管 CLI `0.1.1-rc.2`，并在每次转发前核对受管 cmd、Desktop executable 与 `app.asar` 的精确路径和 SHA-256；`dsh.cmd` 只委托给这个 PowerShell 校验入口。任一身份不匹配都会失败关闭，绝不回退到 `D:\AI\deepseek-harness` 的工作区 CLI，因为两者即使带相近版本标签也可能有不兼容的核心 ABI。升级 Desktop 或恢复通道时，先保持 DSH 停止，审查新的受管通道，再同步更新 wrapper 与 `D:\AI\dsh-cli-repair\verify-desktop-channel.ps1` 中的固定路径、哈希和版本，运行该验证及本节全部 keyless gate；不要绕过管理命令直接改 profile。
+终端用户应使用上面的已校验 Release 安装器，不要手工编辑 profile 的 `package.json`、lockfile 或 bundle 列表。对更高版本重复运行 bootstrap 即升级；降级必须显式传入 `-AllowDowngrade`。卸载使用同一 Release 中、已经 manifest 校验过的 `uninstall.ps1`。卸载只移除 package 和 bundle 注册，保留 `%DSH_HOME%\storages\dsh-market-intelligence` 或用户已有的显式存储根；数据清理是另外的手动决定。详见[安装与恢复指南](docs/INSTALL.md)。
 
 ## Smoke 检查
 
@@ -202,7 +302,7 @@ Remove-Item Env:DSH_MARKET_LIVE_SMOKE
 1. 先正常退出 DSH Desktop，确认收集已经停止；复制 `config.json`、`market.sqlite`、`market.sqlite-wal` 和 `market.sqlite-shm`（若存在）作为备份。
 2. 上游故障时先查看 `market_data_health`；不要把任意替代 URL 写入配置。等待恢复或发布经过审查的 provider 更新。
 3. 数据库损坏时保留 `config.json`，把 SQLite 文件组移动到带时间戳的隔离目录后再启动 DSH，让插件重建数据库。新数据库没有旧 provider 健康锚点，因此不会猜测数据库丢失前的区间；插件绝不伪造行情。正常保留数据库的重启会按上述有界规则回补 provider 明确支持的历史能力，或记录 `provider_history_unavailable` gap。
-4. 代码回滚时切换到先前已验收提交，重新运行 keyless 验证，然后在 DSH 停止状态下重复管理式 `add .`。不要只复制旧 `lib` 覆盖新源码。
-5. 若插件无法加载且需要快速隔离，使用管理式 `remove dsh-market-intelligence`；运行数据保持不动，确认恢复方案后再决定是否清理。
+4. 版本回退时使用先前已审查的固定 GitHub Release、匹配的 tag API 和 `-AllowDowngrade`；不要只复制旧 `lib` 覆盖已安装 package。
+5. 若插件无法加载且需要快速隔离，使用同一 Release 中经过 manifest 校验的 `uninstall.ps1`；运行数据保持不动，确认恢复方案后再决定是否清理。
 
 DSH Desktop 停止即停止采集，这是设计边界，不是故障。如果需要常驻服务、更多市场/数据源、模型可见的新字段或任何交易能力，必须另行设计与安全审查。

@@ -3,6 +3,7 @@ node_modules/
 *.sqlite-shm
 *.sqlite-wal
 .planning/
+.worktrees/
 .env
 .env.*
 !.env.example

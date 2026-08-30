@@ -51,7 +51,7 @@ test('canonical quotes round-trip as complete JSON-safe records', () => {
   assert.deepEqual(JSON.parse(JSON.stringify(quote)), quote);
 });
 
-test('runtime paths stay below the configured DSH storage root', () => {
+test('runtime paths preserve the existing D-drive storage root when storageDir is omitted', () => {
   const paths = resolveRuntimePaths('D:\\AI\\dsh');
   assert.equal(paths.root, 'D:\\AI\\dsh\\storages\\dsh-market-intelligence');
   assert.equal(paths.database, 'D:\\AI\\dsh\\storages\\dsh-market-intelligence\\market.sqlite');

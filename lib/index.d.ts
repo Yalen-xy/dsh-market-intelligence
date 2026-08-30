@@ -28,6 +28,7 @@ type SinaMarketProvider = Pick<MarketProvider, 'quotes'> & {
 };
 export type PluginDependencies = {
     getDshHome(): string | undefined;
+    assertSafePath(pathValue: string): Promise<void>;
     mkdir(directory: string, options: {
         recursive: true;
     }): Promise<unknown>;

@@ -17,14 +17,19 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
+    "LICENSE",
+    "docs/INSTALL.md",
     "scripts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --import tsx --test test/*.test.ts",
+    "test:installer:windows-powershell": "node scripts/run-installer-tests.mjs powershell.exe",
+    "test:installer:pwsh": "node scripts/run-installer-tests.mjs pwsh",
     "test:load": "node --import tsx --test test/load.test.ts",
     "test:load-profile": "node scripts/profile-smoke.mjs",
     "smoke:live": "node scripts/live-smoke.mjs",
+    "release:stage": "node scripts/stage-release.mjs",
     "prepack": "npm run build && npm test"
   },
   "dsh": {
@@ -43,7 +48,7 @@
   "bugs": {
     "url": "https://github.com/Yalen-xy/dsh-market-intelligence/issues"
   },
-  "license": "UNLICENSED",
+  "license": "SEE LICENSE IN LICENSE",
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.8",
