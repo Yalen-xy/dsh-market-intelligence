@@ -145,6 +145,48 @@ function Test-LocalFixedPath {
     return $true
 }
 
+function Resolve-SystemTarCommand {
+    [CmdletBinding()]
+    param()
+
+    try {
+        $systemRoot = [string]$env:SystemRoot
+        if ([string]::IsNullOrWhiteSpace($systemRoot)) { throw 'invalid' }
+        $trustedSystemRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+        if ([string]::IsNullOrWhiteSpace($trustedSystemRoot) -or
+            -not [string]::Equals($systemRoot, $trustedSystemRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'invalid'
+        }
+        $nativeDirectory = if (-not [Environment]::Is64BitProcess -and [Environment]::Is64BitOperatingSystem) { 'Sysnative' } else { 'System32' }
+        $tarPath = Join-Path (Join-Path $systemRoot $nativeDirectory) 'tar.exe'
+        if ($tarPath -notmatch '^[A-Za-z]:\\' -or $tarPath.Contains('/') -or
+            -not [string]::Equals([System.IO.Path]::GetFullPath($tarPath), $tarPath, [System.StringComparison]::Ordinal)) {
+            throw 'invalid'
+        }
+        $driveRoot = [System.IO.Path]::GetPathRoot($tarPath)
+        $drive = New-Object System.IO.DriveInfo($driveRoot)
+        if (-not $drive.IsReady -or $drive.DriveType -ne [System.IO.DriveType]::Fixed) { throw 'invalid' }
+        $current = $tarPath
+        while ($true) {
+            if (Test-Path -LiteralPath $current) {
+                $currentItem = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+                if (($currentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'invalid' }
+            }
+            if ([string]::Equals($current, $driveRoot, [System.StringComparison]::OrdinalIgnoreCase)) { break }
+            $parent = [System.IO.Directory]::GetParent($current)
+            $current = if ($parent -eq $null) { $driveRoot } else { $parent.FullName }
+        }
+        if (-not (Test-Path -LiteralPath $tarPath -PathType Leaf)) { throw 'invalid' }
+        $tarItem = Get-Item -LiteralPath $tarPath -Force -ErrorAction Stop
+        if (($tarItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            -not [string]::Equals([string]$tarItem.FullName, $tarPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'invalid'
+        }
+        return [string]$tarPath
+    }
+    catch { throw 'tar_required' }
+}
+
 function Resolve-DshHome {
     [CmdletBinding()]
     param(
@@ -1718,13 +1760,12 @@ function Test-ReleasePackage {
         [Parameter(Mandatory = $true)][string]$RequestedVersion
     )
 
-    $tar = Get-Command tar.exe -CommandType Application -ErrorAction SilentlyContinue
-    if ($tar -eq $null) { throw 'tar_required' }
+    $tarCommandPath = Resolve-SystemTarCommand
     $listArguments = @('-tf', $TarPath)
-    $entries = @(& $tar.Path @listArguments 2>$null | ForEach-Object { ([string]$_).Replace('\', '/') })
+    $entries = @(& $tarCommandPath @listArguments 2>$null | ForEach-Object { ([string]$_).Replace('\', '/') })
     if ($LASTEXITCODE -ne 0) { throw 'package_archive_invalid' }
     $verboseArguments = @('-tvf', $TarPath)
-    $verboseEntries = @(& $tar.Path @verboseArguments 2>$null | ForEach-Object { [string]$_ })
+    $verboseEntries = @(& $tarCommandPath @verboseArguments 2>$null | ForEach-Object { [string]$_ })
     if ($LASTEXITCODE -ne 0 -or $entries.Count -ne $verboseEntries.Count -or $entries.Count -eq 0) { throw 'package_archive_invalid' }
     $seen = @{}
     for ($index = 0; $index -lt $entries.Count; $index++) {
@@ -1745,7 +1786,7 @@ function Test-ReleasePackage {
     foreach ($required in @('package/package.json', 'package/lib/index.js', 'package/cordis.patch.yml', 'package/LICENSE')) {
         if (@($entries | Where-Object { $_ -ceq $required }).Count -ne 1) { throw 'package_metadata_invalid' }
     }
-    try { $metadata = (Read-TarEntry -TarPath $TarPath -ArchivePath 'package/package.json' -TarCommand $tar.Path) | ConvertFrom-Json }
+    try { $metadata = (Read-TarEntry -TarPath $TarPath -ArchivePath 'package/package.json' -TarCommand $tarCommandPath) | ConvertFrom-Json }
     catch { throw 'package_metadata_invalid' }
     if ([string]$metadata.name -cne 'dsh-market-intelligence' -or
         [string]$metadata.version -cne $RequestedVersion -or
@@ -1758,7 +1799,7 @@ function Test-ReleasePackage {
     if (Test-Path -LiteralPath $inspectionRoot) { throw 'package_archive_invalid' }
     [System.IO.Directory]::CreateDirectory($inspectionRoot) | Out-Null
     $extractArguments = @('-xf', $TarPath, '-C', $inspectionRoot)
-    & $tar.Path @extractArguments 2>$null | Out-Null
+    & $tarCommandPath @extractArguments 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'package_archive_invalid' }
     $packageRoot = Join-Path $inspectionRoot 'package'
     try { $packageSnapshot = Get-OrdinaryTreeSnapshot -Root $packageRoot -ReparseErrorCategory 'package_archive_invalid' }

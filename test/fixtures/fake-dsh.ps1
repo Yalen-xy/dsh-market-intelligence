@@ -52,11 +52,13 @@ if ($verb -eq 'add' -and $args.Count -eq 5) {
     if ($isRollback -and [bool]$control.rollbackFailure) { throw 'fake_cli_rollback_failed' }
     $tgzPath = [string]$args[4]
     if (-not (Test-Path -LiteralPath $tgzPath -PathType Leaf)) { throw 'fake_cli_package_missing' }
-    $tarCommand = Get-Command tar.exe -CommandType Application -ErrorAction Stop
+    $nativeDirectory = if (-not [Environment]::Is64BitProcess -and [Environment]::Is64BitOperatingSystem) { 'Sysnative' } else { 'System32' }
+    $tarPath = Join-Path (Join-Path ([string]$env:SystemRoot) $nativeDirectory) 'tar.exe'
+    if (-not (Test-Path -LiteralPath $tarPath -PathType Leaf)) { throw 'fake_cli_tar_missing' }
     $stageRoot = Join-Path $profileRoot ('.fake-dsh-stage-' + [guid]::NewGuid().ToString('D'))
     [System.IO.Directory]::CreateDirectory($stageRoot) | Out-Null
     try {
-        & $tarCommand.Path @('-xf', $tgzPath, '-C', $stageRoot) 2>&1 | Out-Null
+        & $tarPath @('-xf', $tgzPath, '-C', $stageRoot) 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'fake_cli_extract_failed' }
         $sourcePackage = Join-Path $stageRoot 'package'
         $packageMetadataPath = Join-Path $sourcePackage 'package.json'

@@ -200,6 +200,90 @@ test('local path policy rejects non-fixed drives and existing reparse-point ance
   );
 });
 
+test('system tar resolver ignores multiple PATH matches and returns one trusted Windows tar path', async (t) => {
+  const output = await invokeInstallerPowerShell(t, [
+    "$ErrorActionPreference = 'Stop'",
+    '. ([string]$env:DSH_INSTALLER_SCRIPT)',
+    '$first = Join-Path $env:DSH_INSTALLER_TEST_ROOT first',
+    '$second = Join-Path $env:DSH_INSTALLER_TEST_ROOT second',
+    '[System.IO.Directory]::CreateDirectory($first) | Out-Null',
+    '[System.IO.Directory]::CreateDirectory($second) | Out-Null',
+    '$nativeDirectory = if (-not [Environment]::Is64BitProcess -and [Environment]::Is64BitOperatingSystem) { "Sysnative" } else { "System32" }',
+    '$expected = Join-Path (Join-Path ([string]$env:SystemRoot) $nativeDirectory) tar.exe',
+    'Copy-Item -LiteralPath $expected -Destination (Join-Path $first tar.exe)',
+    'Copy-Item -LiteralPath $expected -Destination (Join-Path $second tar.exe)',
+    '$env:PATH = $first + [IO.Path]::PathSeparator + $second + [IO.Path]::PathSeparator + $env:PATH',
+    '$pathMatches = @(Get-Command tar.exe -All -CommandType Application -ErrorAction Stop)',
+    '$resolved = Resolve-SystemTarCommand',
+    '[ordered]@{ matchCount = $pathMatches.Count; resolved = [string]$resolved; expected = [string]$expected; scalar = $resolved -is [string] } | ConvertTo-Json -Compress',
+  ].join('\n'));
+
+  const result = parseJsonOutput<{ matchCount: number; resolved: string; expected: string; scalar: boolean }>(output);
+  assert.ok(result.matchCount >= 3, `expected at least three tar.exe PATH matches, got ${result.matchCount}`);
+  assert.equal(result.resolved.toLowerCase(), result.expected.toLowerCase());
+  assert.equal(result.scalar, true);
+});
+
+test('system tar resolver fails closed when the fixed Windows tar is missing', async (t) => {
+  await assert.rejects(
+    invokeInstallerPowerShell(t, [
+      "$ErrorActionPreference = 'Stop'",
+      '. ([string]$env:DSH_INSTALLER_SCRIPT)',
+      '$fakeWindows = Join-Path $env:DSH_INSTALLER_TEST_ROOT Windows',
+      '[System.IO.Directory]::CreateDirectory((Join-Path $fakeWindows System32)) | Out-Null',
+      '$env:SystemRoot = $fakeWindows',
+      'Resolve-SystemTarCommand | Out-Null',
+    ].join('\n')),
+    /tar_required/,
+  );
+});
+
+test('system tar resolver fails closed for an unsafe Windows root', async (t) => {
+  await assert.rejects(
+    invokeInstallerPowerShell(t, [
+      "$ErrorActionPreference = 'Stop'",
+      '. ([string]$env:DSH_INSTALLER_SCRIPT)',
+      '$env:SystemRoot = "\\\\server\\share\\Windows"',
+      'Resolve-SystemTarCommand | Out-Null',
+    ].join('\n')),
+    /tar_required/,
+  );
+});
+
+test('system tar resolver rejects an ordinary executable under a caller-substituted fixed Windows root', async (t) => {
+  await assert.rejects(
+    invokeInstallerPowerShell(t, [
+      "$ErrorActionPreference = 'Stop'",
+      '. ([string]$env:DSH_INSTALLER_SCRIPT)',
+      '$fakeWindows = Join-Path $env:DSH_INSTALLER_TEST_ROOT fake-Windows',
+      '$system32 = Join-Path $fakeWindows System32',
+      '[System.IO.Directory]::CreateDirectory($system32) | Out-Null',
+      '[System.IO.File]::WriteAllBytes((Join-Path $system32 tar.exe), [byte[]](77, 90))',
+      '$env:SystemRoot = $fakeWindows',
+      'Resolve-SystemTarCommand | Out-Null',
+    ].join('\n')),
+    /tar_required/,
+  );
+});
+
+test('system tar resolver fails closed when the Windows tar path traverses a reparse point', async (t) => {
+  await assert.rejects(
+    invokeInstallerPowerShell(t, [
+      "$ErrorActionPreference = 'Stop'",
+      '. ([string]$env:DSH_INSTALLER_SCRIPT)',
+      '$targetWindows = Join-Path $env:DSH_INSTALLER_TEST_ROOT target-Windows',
+      '$linkedWindows = Join-Path $env:DSH_INSTALLER_TEST_ROOT linked-Windows',
+      '$system32 = Join-Path $targetWindows System32',
+      '[System.IO.Directory]::CreateDirectory($system32) | Out-Null',
+      '[System.IO.File]::WriteAllBytes((Join-Path $system32 tar.exe), [byte[]](77, 90))',
+      'New-Item -ItemType Junction -Path $linkedWindows -Target $targetWindows | Out-Null',
+      '$env:SystemRoot = $linkedWindows',
+      'Resolve-SystemTarCommand | Out-Null',
+    ].join('\n')),
+    /tar_required/,
+  );
+});
+
 test('storage fingerprint rejects a reparse-point descendant without traversing its target', async (t) => {
   await assert.rejects(
     invokeInstallerPowerShell(t, [

@@ -13,6 +13,10 @@ test('CI keeps build, test, and package gates and adds both Windows installer sh
   assert.match(workflow, /actions\/setup-node@v4/);
   assert.match(workflow, /node-version:\s*24/);
   assert.match(workflow, /cache:\s*npm/);
+  const ciJob = extractJob(workflow, 'verify');
+  const timeout = /timeout-minutes:\s*(\d+)/.exec(ciJob);
+  assert.ok(timeout, 'expected an explicit CI timeout');
+  assert.ok(Number(timeout[1]) >= 30, `expected CI timeout of at least 30 minutes, got ${timeout[1]}`);
   assertInOrder(workflow, [
     'npm ci',
     'npm run build',
