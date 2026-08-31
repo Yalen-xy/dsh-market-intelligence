@@ -1,7 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import type { Readable, Writable } from 'node:stream';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
   loadUserState,
@@ -19,6 +18,7 @@ import { MarketService } from '../src/service.js';
 import { readClaudeConfig, resolveClaudeBaseDirectory } from './config.js';
 import { createClaudeLogger } from './logging.js';
 import { createClaudeMcpServer } from './mcp-server.js';
+import { ClaudeStdioServerTransport } from './stdio-transport.js';
 
 type SignalSource = {
   once(event: 'SIGINT' | 'SIGTERM', listener: () => void): unknown;
@@ -100,7 +100,7 @@ export async function runClaudeServer(
   managed.server.onclose = handleSignal;
 
   try {
-    const transport = (streams.transportFactory ?? ((input, output) => new StdioServerTransport(input, output)))(streams.stdin, streams.stdout);
+    const transport = (streams.transportFactory ?? ((input, output) => new ClaudeStdioServerTransport(input, output)))(streams.stdin, streams.stdout);
     await managed.server.connect(transport);
   } catch (error) {
     logger.error('protocol');

@@ -121,3 +121,57 @@ npm test
 ```
 
 Exit 0: 457 passed, 0 failed, 0 cancelled, 0 skipped; duration 124252 ms. No live provider request or Claude installation was performed.
+
+## Fix round 2
+
+### Root cause and implementation
+
+SDK 1.30.0's stdio `ReadBuffer` calls `JSONRPCMessageSchema.parse()` before invoking the transport `onmessage` callback. Its JSON-RPC request schema permits only object-shaped `params`, so `tools/call` frames with `params` equal to null, an array, a string, a number, or a boolean were reported only through the transport error callback and never reached either the MCP server or the round-1 fallback handler. A wrapper around the SDK transport could not recover the discarded raw frame because the public `Transport` interface exposes only already-parsed messages.
+
+Added `ClaudeStdioServerTransport`, a narrowly scoped SDK-compatible newline transport. At the raw JSON boundary it recognizes only a JSON-RPC 2.0 request with a valid SDK request id, method `tools/call`, and a present non-object `params` container. It writes one fixed `-32602 Invalid Params` response and does not forward that frame. Every other parsed value is still validated by the SDK's canonical `JSONRPCMessageSchema` and delivered to `Server` unchanged. Serialization, the SDK 10 MiB buffer default, writable backpressure, listener removal, input pausing, and close callbacks mirror the pinned SDK transport behavior.
+
+The production entry point and real child-process fixture now use this transport. Existing tests continue to cover missing params, malformed names and arguments, all valid tools, unknown tools, cancellation, lifecycle, stdout framing, and stderr isolation. The new raw in-memory stdio test covers all five previously discarded params containers and asserts exactly one schema-valid response for each id, numeric code `-32602`, a fixed bounded message, no error data, no reflected path/body/secret text, no duplicate ids, and zero market-service calls.
+
+### TDD evidence
+
+RED:
+
+```text
+node --import tsx --test test/claude-mcp.test.ts
+```
+
+Exit 1: 10 passed and 1 failed. The new raw stdio test timed out after initialization because SDK `StdioServerTransport` discarded all five malformed `tools/call` request frames without emitting any response.
+
+Focused GREEN:
+
+```text
+node --import tsx --test test/claude-mcp.test.ts test/tool-contracts.test.ts test/runtime.test.ts
+```
+
+Exit 0: 17 passed, 0 failed, 0 cancelled, 0 skipped; duration 1021 ms.
+
+### Final verification
+
+```text
+npm run typecheck:claude
+```
+
+Exit 0.
+
+```text
+npm run build
+```
+
+Exit 0; no tracked generated output changed.
+
+```text
+npm test
+```
+
+Exit 0: 458 passed, 0 failed, 0 cancelled, 0 skipped; duration 121804 ms. No live provider request or Claude installation was performed.
+
+```text
+git diff --check
+```
+
+Exit 0.

@@ -92,8 +92,8 @@ export function createRuntimeFixture(): {
 }
 
 async function runFixture(): Promise<void> {
-  const [{ StdioServerTransport }, { createClaudeLogger }, { createClaudeMcpServer }] = await Promise.all([
-    import('@modelcontextprotocol/sdk/server/stdio.js'),
+  const [{ ClaudeStdioServerTransport }, { createClaudeLogger }, { createClaudeMcpServer }] = await Promise.all([
+    import('../../claude/stdio-transport.ts'),
     import('../../claude/logging.ts'),
     import('../../claude/mcp-server.ts'),
   ]);
@@ -101,7 +101,7 @@ async function runFixture(): Promise<void> {
   const logger = createClaudeLogger(process.stderr);
   const managed = createClaudeMcpServer(() => fixture.runtime, logger);
   process.stdin.once('end', () => { void managed.close(); });
-  await managed.server.connect(new StdioServerTransport(process.stdin, process.stdout));
+  await managed.server.connect(new ClaudeStdioServerTransport(process.stdin, process.stdout));
   logger.info('ready');
 }
 

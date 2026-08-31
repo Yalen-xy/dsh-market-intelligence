@@ -121,6 +121,53 @@ test('maps every malformed tools/call envelope that reaches the server to bounde
   }
 });
 
+test('stdio returns one bounded invalid-params frame for every non-object tools/call params container', async () => {
+  const fixture = createRuntimeFixture();
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const signals = new EventEmitter();
+  let output = '';
+  stdout.setEncoding('utf8').on('data', (chunk) => { output += chunk; });
+  await runClaudeServer({ LOCALAPPDATA: 'C:\\Users\\fixture\\AppData\\Local' }, {
+    stdin,
+    stdout,
+    stderr,
+    signals,
+    runtimeFactory: async () => fixture.runtime,
+  });
+  const hostile = 'secret-token at D:\\Users\\fixture and <upstream-body>';
+  const invalidParams = [null, [], hostile, 7, true] as const;
+  try {
+    stdin.write(`${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'raw-fixture', version: '1.0.0' } },
+    })}\n`);
+    await waitFor(() => output.split(/\r?\n/).filter(Boolean).length === 1);
+    stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
+    for (const [index, params] of invalidParams.entries()) {
+      stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: index + 10, method: 'tools/call', params })}\n`);
+    }
+    await waitFor(() => output.split(/\r?\n/).filter(Boolean).length >= invalidParams.length + 1);
+    const frames = output.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    for (const frame of frames) assert.doesNotThrow(() => JSONRPCMessageSchema.parse(frame));
+    const callFrames = frames.filter((frame) => typeof frame.id === 'number' && frame.id >= 10);
+    assert.deepEqual(callFrames, invalidParams.map((_params, index) => ({
+      jsonrpc: '2.0',
+      id: index + 10,
+      error: { code: ErrorCode.InvalidParams, message: 'Invalid tools/call request' },
+    })));
+    assert.equal(new Set(callFrames.map(({ id }) => id)).size, invalidParams.length);
+    assert.equal(fixture.calls.length, 0);
+    assert.doesNotMatch(JSON.stringify(callFrames), /secret-token|Users|upstream-body|expected|received|path/i);
+  } finally {
+    signals.emit('SIGTERM');
+    await waitFor(() => fixture.disposeCalls() === 1);
+  }
+});
+
 test('maps service failures to a bounded tool error without serializing thrown values', async () => {
   const fixture = createRuntimeFixture();
   fixture.service.quotes = async () => { throw new Error('secret-token at D:\\Users\\fixture and <upstream-body>'); };
