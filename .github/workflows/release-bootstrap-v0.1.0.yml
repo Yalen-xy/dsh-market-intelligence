@@ -1,4 +1,4 @@
-name: Release bootstrap v0.1.0
+name: Recover verified draft Release v0.1.0
 
 'on':
   push:
@@ -15,246 +15,238 @@ concurrency:
 env:
   RELEASE_TAG: v0.1.0
   RELEASE_VERSION: 0.1.0
+  RELEASE_ID: '379294023'
   RELEASE_TARGET_SHA: 354c925ae3be6c681f06cb0d40de6b92e2d22783
   RELEASE_TARGET_TREE_SHA: c7efff10c3f730bec62127f6dab127b62c1f8f26
+  RELEASE_ENUMERATION_MAX_PAGES: 10
 
 jobs:
   release:
     runs-on: windows-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 10
     steps:
-      - name: Fail closed when v0.1.0 already has a tag or Release
+      - name: Verify and publish the existing v0.1.0 draft
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-          $headers = @{
-            Accept = 'application/vnd.github+json'
-            Authorization = "Bearer $env:GH_TOKEN"
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
 
-          function Assert-GitHubResourceAbsent {
+          function Invoke-ApiGet {
             param(
               [Parameter(Mandatory)] [string] $Uri,
-              [Parameter(Mandatory)] [string] $Label
+              [Parameter(Mandatory)] [string] $Label,
+              [switch] $ExpectArray
             )
 
-            $response = Invoke-WebRequest -Uri $Uri -Headers $headers -SkipHttpErrorCheck -ErrorAction Stop
-            if ($response.StatusCode -eq 404) {
-              return
+            $fixedApiRoot = "https://api.github.com/repos/$env:GITHUB_REPOSITORY"
+            if ($Uri -cne $fixedApiRoot -and -not $Uri.StartsWith("$fixedApiRoot/", [System.StringComparison]::Ordinal)) {
+              throw 'API GET URI is outside the fixed repository API root; failing closed'
             }
-            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
-              throw "$Label already exists; refusing to bootstrap a duplicate release"
+            $headers = @{
+              Accept = 'application/vnd.github+json'
+              Authorization = "Bearer $env:GH_TOKEN"
+              'X-GitHub-Api-Version' = '2022-11-28'
             }
-            throw "could not prove $Label is absent (HTTP $($response.StatusCode)); failing closed"
+            $response = Invoke-WebRequest -Method Get -Uri $Uri -Headers $headers -SkipHttpErrorCheck -ErrorAction Stop
+            if ($response.StatusCode -ne 200) {
+              throw "could not prove $Label (HTTP $($response.StatusCode)); failing closed"
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$response.Content)) {
+              throw "$Label returned an empty response; failing closed"
+            }
+            if ($ExpectArray -and -not $response.Content.TrimStart().StartsWith('[', [System.StringComparison]::Ordinal)) {
+              throw "$Label did not return a JSON array; failing closed"
+            }
+            try {
+              return ($response.Content | ConvertFrom-Json -Depth 100)
+            } catch {
+              throw "$Label returned invalid JSON; failing closed"
+            }
+          }
+
+          function Assert-ReleaseContract {
+            param(
+              [Parameter(Mandatory)] [object] $Release,
+              [Parameter(Mandatory)] [bool] $ExpectedDraft,
+              [Parameter(Mandatory)] [object] $Repository
+            )
+
+            $requiredReleaseFields = @('tag_name', 'draft', 'prerelease', 'target_commitish', 'id', 'node_id', 'html_url', 'assets')
+            foreach ($field in $requiredReleaseFields) {
+              if (-not ($Release.PSObject.Properties.Name -ccontains $field) -or $null -eq $Release.$field) {
+                throw "Release is missing required field '$field'; failing closed"
+              }
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$Release.tag_name) -or $Release.tag_name -cne $env:RELEASE_TAG) {
+              throw 'Release tag_name is not the exact recovery tag; failing closed'
+            }
+            if ($Release.draft -isnot [bool] -or $Release.prerelease -isnot [bool]) {
+              throw 'Release draft/prerelease fields are not booleans; failing closed'
+            }
+            if ([bool]$Release.draft -ne $ExpectedDraft) {
+              throw 'Release draft state is not the required state; failing closed'
+            }
+            if ([bool]$Release.prerelease) {
+              throw 'Release is unexpectedly a prerelease; failing closed'
+            }
+
+            if ([string]::IsNullOrWhiteSpace([string]$Release.target_commitish)) {
+              throw 'Release target_commitish is empty; failing closed'
+            }
+            $allowedTargetCommitish = @(
+              $env:RELEASE_TARGET_SHA
+              $env:RELEASE_TAG
+              "refs/tags/$env:RELEASE_TAG"
+              [string]$Repository.default_branch
+              "refs/heads/$($Repository.default_branch)"
+            )
+            if (-not ($allowedTargetCommitish -ccontains [string]$Release.target_commitish)) {
+              throw 'Release target_commitish conflicts with the fixed tag association; failing closed'
+            }
+
+            try {
+              $releaseId = [long]$Release.id
+            } catch {
+              throw 'Release id is not an integer; failing closed'
+            }
+            if ($releaseId -le 0) {
+              throw 'Release id is empty or invalid; failing closed'
+            }
+            if ($releaseId -ne [long]$env:RELEASE_ID) {
+              throw 'Release id does not match the fixed recovery Release; failing closed'
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$Release.node_id)) {
+              throw 'Release node_id is empty; failing closed'
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$Release.html_url)) {
+              throw 'Release html_url is empty; failing closed'
+            }
+            try {
+              $releaseHtmlUri = [uri][string]$Release.html_url
+            } catch {
+              throw 'Release html_url is invalid; failing closed'
+            }
+            $expectedHtmlPrefix = "https://github.com/$env:GITHUB_REPOSITORY/releases/tag/"
+            if ($releaseHtmlUri.Scheme -cne 'https' -or
+                $releaseHtmlUri.Host -cne 'github.com' -or
+                -not $releaseHtmlUri.AbsoluteUri.StartsWith($expectedHtmlPrefix, [System.StringComparison]::Ordinal)) {
+              throw 'Release html_url does not belong to the authenticated repository; failing closed'
+            }
+
+            $expectedNames = @(
+              "dsh-market-intelligence-$env:RELEASE_VERSION.tgz"
+              'install.ps1'
+              'uninstall.ps1'
+              'SHA256SUMS.txt'
+              'LICENSE.txt'
+            ) | Sort-Object -CaseSensitive
+            $assets = @($Release.assets)
+            if ($assets.Count -ne 5) {
+              throw 'Release does not contain exactly five assets; failing closed'
+            }
+            foreach ($asset in $assets) {
+              $requiredAssetFields = @('name', 'size')
+              foreach ($field in $requiredAssetFields) {
+                if (-not ($asset.PSObject.Properties.Name -ccontains $field) -or $null -eq $asset.$field) {
+                  throw "Release asset is missing required field '$field'; failing closed"
+                }
+              }
+              if ([string]::IsNullOrWhiteSpace([string]$asset.name)) {
+                throw 'Release contains an asset with an empty name; failing closed'
+              }
+              try {
+                $assetSize = [long]$asset.size
+              } catch {
+                throw 'Release contains an asset with a non-integer size; failing closed'
+              }
+              if ($assetSize -le 0) {
+                throw 'Release contains an empty asset; failing closed'
+              }
+            }
+            $duplicateNames = @($assets | Group-Object -Property name -CaseSensitive | Where-Object { $_.Count -ne 1 })
+            if ($duplicateNames.Count -ne 0) {
+              throw 'Release contains duplicate asset names; failing closed'
+            }
+            $actualNames = @($assets | ForEach-Object { [string]$_.name } | Sort-Object -CaseSensitive)
+            if ((Compare-Object $expectedNames $actualNames -CaseSensitive).Count -ne 0) {
+              throw 'Release asset names differ from the exact five-file allowlist; failing closed'
+            }
           }
 
           $apiRoot = "https://api.github.com/repos/$env:GITHUB_REPOSITORY"
-          $repositoryResponse = Invoke-WebRequest -Uri $apiRoot -Headers $headers -SkipHttpErrorCheck -ErrorAction Stop
-          if ($repositoryResponse.StatusCode -ne 200) {
-            throw "could not authenticate and read $env:GITHUB_REPOSITORY (HTTP $($repositoryResponse.StatusCode)); failing closed"
-          }
-          $repository = $repositoryResponse.Content | ConvertFrom-Json
+          $repository = Invoke-ApiGet -Uri $apiRoot -Label 'repository identity'
           if ($repository.full_name -cne $env:GITHUB_REPOSITORY) {
-            throw "authenticated repository identity does not exactly match $env:GITHUB_REPOSITORY; failing closed"
+            throw 'authenticated repository identity does not exactly match GITHUB_REPOSITORY; failing closed'
           }
-          $commitResponse = Invoke-WebRequest -Uri "$apiRoot/git/commits/$env:RELEASE_TARGET_SHA" -Headers $headers -SkipHttpErrorCheck -ErrorAction Stop
-          if ($commitResponse.StatusCode -ne 200) {
-            throw "could not authenticate and read fixed Git commit $env:RELEASE_TARGET_SHA (HTTP $($commitResponse.StatusCode)); failing closed"
+          if ([string]::IsNullOrWhiteSpace([string]$repository.default_branch)) {
+            throw 'authenticated repository default branch is empty; failing closed'
           }
-          $commit = $commitResponse.Content | ConvertFrom-Json
+
+          $commit = Invoke-ApiGet -Uri "$apiRoot/git/commits/$env:RELEASE_TARGET_SHA" -Label 'fixed Git commit'
           if ($commit.sha -cne $env:RELEASE_TARGET_SHA -or $commit.tree.sha -cne $env:RELEASE_TARGET_TREE_SHA) {
-            throw 'authenticated fixed Git commit does not exactly match the configured commit/tree; failing closed'
-          }
-          Assert-GitHubResourceAbsent -Uri "$apiRoot/releases/tags/$env:RELEASE_TAG" -Label "GitHub Release $env:RELEASE_TAG"
-          Assert-GitHubResourceAbsent -Uri "$apiRoot/git/ref/tags/$env:RELEASE_TAG" -Label "Git tag $env:RELEASE_TAG"
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Check out fixed release target without credentials
-        uses: actions/checkout@v4
-        with:
-          ref: 354c925ae3be6c681f06cb0d40de6b92e2d22783
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Verify checked-out release commit and tree
-        shell: pwsh
-        run: |
-          $actualSha = (git rev-parse HEAD).Trim()
-          $actualTreeSha = (git rev-parse 'HEAD^{tree}').Trim()
-          if ($actualSha -cne $env:RELEASE_TARGET_SHA) {
-            throw "checked-out SHA does not match fixed release target: $actualSha"
-          }
-          if ($actualTreeSha -cne $env:RELEASE_TARGET_TREE_SHA) {
-            throw "checked-out tree does not match fixed release target tree: $actualTreeSha"
+            throw 'fixed Git commit/tree does not exactly match the recovery target; failing closed'
           }
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build
-        run: npm run build
-
-      - name: Test
-        run: npm test
-
-      - name: Run profile smoke test
-        run: npm run test:load-profile
-
-      - name: Test installer with Windows PowerShell 5.1
-        run: npm run test:installer:windows-powershell
-
-      - name: Test installer with PowerShell 7
-        run: npm run test:installer:pwsh
-
-      - name: Inspect, create, and stage verified assets
-        shell: pwsh
-        run: |
-          npm pack --dry-run --ignore-scripts
-          $pack = npm pack --ignore-scripts --json | Out-String | ConvertFrom-Json
-          if (@($pack).Count -ne 1 -or [string]::IsNullOrWhiteSpace($pack[0].filename)) {
-            throw 'npm pack did not produce exactly one package'
-          }
-          $packageFile = $pack[0].filename
-          node scripts/stage-release.mjs --tag $env:RELEASE_TAG --package $packageFile --output .release
-
-      - name: Atomically reserve v0.1.0 at the verified commit
-        shell: pwsh
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          $headers = @{
-            Accept = 'application/vnd.github+json'
-            Authorization = "Bearer $env:GH_TOKEN"
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          $apiRoot = "https://api.github.com/repos/$env:GITHUB_REPOSITORY"
-          $body = @{ ref = "refs/tags/$env:RELEASE_TAG"; sha = $env:RELEASE_TARGET_SHA } | ConvertTo-Json -Compress
-          $response = Invoke-WebRequest -Method Post -Uri "$apiRoot/git/refs" -Headers $headers -ContentType 'application/json' -Body $body -SkipHttpErrorCheck -ErrorAction Stop
-          if ($response.StatusCode -ne 201) {
-            throw "Git Data API did not atomically create refs/tags/$env:RELEASE_TAG (HTTP $($response.StatusCode)); aborting"
-          }
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Verify reserved tag still targets the fixed commit
-        shell: pwsh
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          $headers = @{
-            Accept = 'application/vnd.github+json'
-            Authorization = "Bearer $env:GH_TOKEN"
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          $apiRoot = "https://api.github.com/repos/$env:GITHUB_REPOSITORY"
-          $response = Invoke-WebRequest -Uri "$apiRoot/git/ref/tags/$env:RELEASE_TAG" -Headers $headers -SkipHttpErrorCheck -ErrorAction Stop
-          if ($response.StatusCode -ne 200) {
-            throw "could not read the newly reserved tag (HTTP $($response.StatusCode)); aborting"
-          }
-          $tag = $response.Content | ConvertFrom-Json
+          $tag = Invoke-ApiGet -Uri "$apiRoot/git/ref/tags/$env:RELEASE_TAG" -Label 'existing lightweight tag'
           if ($tag.ref -cne "refs/tags/$env:RELEASE_TAG" -or $tag.object.type -cne 'commit' -or $tag.object.sha -cne $env:RELEASE_TARGET_SHA) {
-            throw 'reserved tag does not exactly target the fixed release commit; aborting'
+            throw 'existing tag is not the exact lightweight tag at the fixed commit; failing closed'
           }
-        env:
-          GH_TOKEN: ${{ github.token }}
 
-      - name: Write fixed Release notes
-        shell: pwsh
-        run: |
-          $notes = @"
-          # dsh-market-intelligence $env:RELEASE_TAG
-
-          ## Requirements
-
-          Windows DSH Desktop with a valid managed desktop profile, Node.js ^22.19.0 or >=24.0.0, and Windows PowerShell 5.1 or PowerShell 7.
-
-          ## Material changes
-
-          This release contains the compiled DSH market-information plugin and its integrity-checked Windows install, upgrade, rollback, and uninstall scripts.
-
-          ## Known provider limitations and disclaimer
-
-          Tencent and Sina are not partners of, and have not authorized, this project. Upstream endpoints may change or become unavailable without notice. Each user is responsible for complying with applicable law and upstream terms. This plugin is for personal, non-commercial, read-only research and is not investment advice. These notices do not create upstream authorization or eliminate legal risk.
-          "@
-          $notes | Set-Content -LiteralPath .release-notes.md -Encoding utf8
-
-      - name: Create a draft Release with exactly five staged assets
-        shell: pwsh
-        run: |
-          $expectedAssets = @(
-            ".release\dsh-market-intelligence-$env:RELEASE_VERSION.tgz"
-            '.release\install.ps1'
-            '.release\uninstall.ps1'
-            '.release\SHA256SUMS.txt'
-            '.release\LICENSE.txt'
-          )
-          $releaseEntries = @(Get-ChildItem -LiteralPath .release -Force)
-          if ($releaseEntries.Count -ne 5 -or @($releaseEntries | Where-Object { $_.PSIsContainer }).Count -ne 0) {
-            throw 'staged release must contain exactly five files'
-          }
-          foreach ($asset in $expectedAssets) {
-            if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
-              throw 'staged release is missing an expected asset'
+          $allReleases = [System.Collections.Generic.List[object]]::new()
+          $enumerationComplete = $false
+          for ($page = 1; $page -le [int]$env:RELEASE_ENUMERATION_MAX_PAGES; $page++) {
+            $pageItems = @(Invoke-ApiGet -Uri "$apiRoot/releases?per_page=100&page=$page" -Label "release enumeration page $page" -ExpectArray)
+            foreach ($item in $pageItems) {
+              if ($null -eq $item) {
+                throw 'release enumeration returned a null item; failing closed'
+              }
+              $allReleases.Add($item)
+            }
+            if ($pageItems.Count -lt 100) {
+              $enumerationComplete = $true
+              break
             }
           }
-          gh release create $env:RELEASE_TAG `
-            ".release\dsh-market-intelligence-$env:RELEASE_VERSION.tgz" `
-            .release\install.ps1 `
-            .release\uninstall.ps1 `
-            .release\SHA256SUMS.txt `
-            .release\LICENSE.txt `
-            --verify-tag --draft --title $env:RELEASE_TAG --notes-file .release-notes.md
-        env:
-          GH_TOKEN: ${{ github.token }}
+          if (-not $enumerationComplete) {
+            throw 'release enumeration exceeded the fixed ten-page bound; failing closed'
+          }
 
-      - name: Verify draft Release tag and exact asset set
-        shell: pwsh
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          $headers = @{
-            Accept = 'application/vnd.github+json'
-            Authorization = "Bearer $env:GH_TOKEN"
-            'X-GitHub-Api-Version' = '2022-11-28'
+          $tagMatches = @($allReleases | Where-Object { $_.tag_name -ceq $env:RELEASE_TAG })
+          if ($tagMatches.Count -ne 1 -or -not [bool]$tagMatches[0].draft -or [long]$tagMatches[0].id -ne [long]$env:RELEASE_ID) {
+            throw 'did not find exactly the fixed draft and no conflicting Release for v0.1.0; failing closed'
           }
-          $apiRoot = "https://api.github.com/repos/$env:GITHUB_REPOSITORY"
-          $response = Invoke-WebRequest -Uri "$apiRoot/releases/tags/$env:RELEASE_TAG" -Headers $headers -SkipHttpErrorCheck -ErrorAction Stop
-          if ($response.StatusCode -ne 200) {
-            throw "could not read the draft Release (HTTP $($response.StatusCode)); leaving the tag and any draft untouched for recovery"
-          }
-          $release = $response.Content | ConvertFrom-Json
-          $tagResponse = Invoke-WebRequest -Uri "$apiRoot/git/ref/tags/$env:RELEASE_TAG" -Headers $headers -SkipHttpErrorCheck -ErrorAction Stop
-          if ($tagResponse.StatusCode -ne 200) {
-            throw "could not re-read the reserved tag (HTTP $($tagResponse.StatusCode)); leaving the tag and any draft untouched for recovery"
-          }
-          $tag = $tagResponse.Content | ConvertFrom-Json
-          $expectedNames = @(
-            "dsh-market-intelligence-$env:RELEASE_VERSION.tgz"
-            'install.ps1'
-            'uninstall.ps1'
-            'SHA256SUMS.txt'
-            'LICENSE.txt'
-          ) | Sort-Object
-          $actualNames = @($release.assets | ForEach-Object { $_.name } | Sort-Object)
-          if ($release.tag_name -cne $env:RELEASE_TAG -or -not $release.draft -or $release.prerelease -or $tag.ref -cne "refs/tags/$env:RELEASE_TAG" -or $tag.object.type -cne 'commit' -or $tag.object.sha -cne $env:RELEASE_TARGET_SHA -or $actualNames.Count -ne 5 -or (Compare-Object $expectedNames $actualNames -CaseSensitive).Count -ne 0) {
-            throw 'draft Release target, tag, or assets are not exactly the verified values; leaving the tag and draft untouched for recovery'
-          }
-        env:
-          GH_TOKEN: ${{ github.token }}
+          $draft = $tagMatches[0]
+          Assert-ReleaseContract -Release $draft -ExpectedDraft $true -Repository $repository
 
-      - name: Publish verified draft Release
-        shell: pwsh
-        run: gh release edit $env:RELEASE_TAG --draft=false
+          $draftReread = Invoke-ApiGet -Uri "$apiRoot/releases/$env:RELEASE_ID" -Label 'fixed draft re-read by id'
+          Assert-ReleaseContract -Release $draftReread -ExpectedDraft $true -Repository $repository
+          if ([long]$draftReread.id -ne [long]$env:RELEASE_ID -or
+              $draftReread.node_id -cne $draft.node_id -or $draftReread.html_url -cne $draft.html_url) {
+            throw 'draft identity changed between enumeration and id re-read; failing closed'
+          }
+
+          $prePublishTag = Invoke-ApiGet -Uri "$apiRoot/git/ref/tags/$env:RELEASE_TAG" -Label 'pre-publication lightweight tag'
+          if ($prePublishTag.ref -cne "refs/tags/$env:RELEASE_TAG" -or $prePublishTag.object.type -cne 'commit' -or $prePublishTag.object.sha -cne $env:RELEASE_TARGET_SHA) {
+            throw 'tag changed before publication; failing closed'
+          }
+
+          gh release edit v0.1.0 --draft=false
+          $publishExitCode = $LASTEXITCODE
+          if ($publishExitCode -ne 0) {
+            throw "gh release edit failed with exit code $publishExitCode; failing closed"
+          }
+
+          $published = Invoke-ApiGet -Uri "$apiRoot/releases/tags/$env:RELEASE_TAG" -Label 'published Release by tag'
+          Assert-ReleaseContract -Release $published -ExpectedDraft $false -Repository $repository
+          if ([long]$published.id -ne [long]$env:RELEASE_ID -or $published.node_id -cne $draft.node_id) {
+            throw 'public by-tag endpoint returned a different Release identity; failing closed'
+          }
+
+          $finalTag = Invoke-ApiGet -Uri "$apiRoot/git/ref/tags/$env:RELEASE_TAG" -Label 'final lightweight tag'
+          if ($finalTag.ref -cne "refs/tags/$env:RELEASE_TAG" -or $finalTag.object.type -cne 'commit' -or $finalTag.object.sha -cne $env:RELEASE_TARGET_SHA) {
+            throw 'tag changed during publication; failing closed'
+          }
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
 
