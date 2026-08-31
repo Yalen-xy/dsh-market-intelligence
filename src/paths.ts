@@ -15,13 +15,19 @@ export function requireLocalWindowsPath(value: unknown, label: string, requiredB
   if (typeof value !== 'string'
     || !path.win32.isAbsolute(value)
     || !WINDOWS_DRIVE_ROOT.test(path.win32.parse(value).root)
-    || path.win32.normalize(value) !== value) {
+    || path.win32.normalize(value) !== value
+    || hasAlternateDataStream(value)) {
     throw new Error(`${label} must be a normalized absolute local Windows path`);
   }
   if (requiredBasename !== undefined && path.win32.basename(value).toLowerCase() !== requiredBasename.toLowerCase()) {
     throw new Error(`${label} must use ${requiredBasename} as its final directory`);
   }
   return value;
+}
+
+function hasAlternateDataStream(value: string): boolean {
+  const root = path.win32.parse(value).root;
+  return value.slice(root.length).split('\\').some((segment) => segment.includes(':'));
 }
 
 export async function getWindowsDriveType(driveRoot: string, execFileImpl: typeof execFile = execFile): Promise<number> {

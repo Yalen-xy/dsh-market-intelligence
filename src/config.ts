@@ -35,6 +35,24 @@ export type MarketRuntimeConfig = {
   watchlistLimit: 100;
 };
 
+export const MARKET_RUNTIME_DEFAULTS = {
+  requestTimeoutMs: 10_000,
+  providerBatchSize: 100,
+  providerConcurrency: 4,
+  quoteIntervalMs: 10_000,
+  sectorIntervalMs: 60_000,
+  sectorPersistIntervalMs: 300_000,
+  minuteRetentionTradingDays: 30,
+  storageSoftLimitBytes: 512 * 1_048_576,
+  watchlistLimit: 100,
+} as const satisfies Omit<MarketRuntimeConfig, 'storageDir'>;
+
+export const MARKET_RUNTIME_INTEGER_LIMITS = {
+  requestTimeoutMs: { minimum: 100, maximum: 120_000 },
+  quoteIntervalMs: { minimum: 1_000, maximum: 300_000 },
+  sectorIntervalMs: { minimum: 10_000, maximum: 900_000 },
+} as const;
+
 export type WatchlistMutation = (watchlist: string[]) => string[] | void;
 
 export function resolveRuntimePaths(dshHome: string, storageDir?: string): RuntimePaths {

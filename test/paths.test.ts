@@ -18,6 +18,7 @@ test('rejects non-local, non-normalized, and relative path forms', () => {
     '\\\\?\\C:\\dsh',
     'C:\\safe\\..\\escape',
     'C:/mixed/separators',
+    'C:\\safe\\dsh:alternate-stream',
   ]) assert.throws(() => requireLocalWindowsPath(value, 'path'), /local Windows path/i);
 });
 

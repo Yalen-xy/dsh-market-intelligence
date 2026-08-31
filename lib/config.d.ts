@@ -30,6 +30,31 @@ export type MarketRuntimeConfig = {
     storageSoftLimitBytes: number;
     watchlistLimit: 100;
 };
+export declare const MARKET_RUNTIME_DEFAULTS: {
+    readonly requestTimeoutMs: 10000;
+    readonly providerBatchSize: 100;
+    readonly providerConcurrency: 4;
+    readonly quoteIntervalMs: 10000;
+    readonly sectorIntervalMs: 60000;
+    readonly sectorPersistIntervalMs: 300000;
+    readonly minuteRetentionTradingDays: 30;
+    readonly storageSoftLimitBytes: number;
+    readonly watchlistLimit: 100;
+};
+export declare const MARKET_RUNTIME_INTEGER_LIMITS: {
+    readonly requestTimeoutMs: {
+        readonly minimum: 100;
+        readonly maximum: 120000;
+    };
+    readonly quoteIntervalMs: {
+        readonly minimum: 1000;
+        readonly maximum: 300000;
+    };
+    readonly sectorIntervalMs: {
+        readonly minimum: 10000;
+        readonly maximum: 900000;
+    };
+};
 export type WatchlistMutation = (watchlist: string[]) => string[] | void;
 export declare function resolveRuntimePaths(dshHome: string, storageDir?: string): RuntimePaths;
 export declare function loadUserState(paths: RuntimePaths): Promise<UserState>;
