@@ -3,6 +3,16 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import type { JsonSchemaObject, MarketToolCallContext, MarketToolContract, MarketToolName, MarketToolsService } from '../src/tool-contracts.js';
+
+const contractTypes: [MarketToolName, JsonSchemaObject, MarketToolCallContext, MarketToolContract | null, MarketToolsService | null] = [
+  'market_quotes',
+  { type: 'object', additionalProperties: false },
+  { signal: new AbortController().signal },
+  null,
+  null,
+];
+void contractTypes;
 
 test('public repository dependency type remains compatible without the recovery extension', () => {
   const directory = mkdtempSync(path.join(process.cwd(), '.tmp-types-'));

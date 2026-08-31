@@ -14,6 +14,7 @@ import type {
   WatchlistResult,
 } from '../src/service.js';
 import { registerMarketTools, type MarketToolsService } from '../src/tools.js';
+import { createMarketToolContracts, MarketToolArgsError, MarketToolOutputError } from '../src/tool-contracts.js';
 
 const TOOL_NAMES = [
   'market_status',
@@ -349,6 +350,39 @@ test('current quote and sector tools default omitted refresh to live provider re
     { method: 'quotes', request: { refresh: true } },
     { method: 'sectors', request: { refresh: true } },
   ]);
+});
+
+test('canonical contracts preserve DSH defaults, normalization, validation, and output safety', async (t) => {
+  const direct = serviceFixture();
+  const registry = serviceFixture();
+  const harness = await toolHarness(registry);
+  t.after(async () => { await harness.ctx.fiber.dispose(); });
+  const contracts = new Map(createMarketToolContracts(direct.service, paths).map((contract) => [contract.name, contract]));
+  const signal = new AbortController().signal;
+
+  await contracts.get('market_quotes')!.execute({ symbols: ['600000', '700.HK'] }, { signal });
+  await execute(harness.ctx, 'market_quotes', { symbols: ['600000', '700.HK'] }, signal);
+  assert.deepEqual(direct.requests, registry.requests);
+
+  for (const [name, args] of [
+    ['market_quotes', { symbols: Array.from({ length: 101 }, () => 'sh600000') }],
+    ['market_series', { symbol: 'sh600000', interval: 'minute', start: '2026-08-27T11:00:00+08:00', end: '2026-08-27T10:00:00+08:00' }],
+    ['market_watchlist', { action: 'get', symbol: 'sh600000' }],
+  ] as const) {
+    await assert.rejects(
+      () => contracts.get(name)!.execute(args, { signal }),
+      (error: unknown) => error instanceof MarketToolArgsError,
+    );
+    const result = await execute(harness.ctx, name, args);
+    assert.equal(result.error.info?.code, 'INVALID_ARGS');
+  }
+
+  const unsafe = serviceFixture({ quotes: { ...quotesResult, items: [{ ...quote, price: Number.NaN }] } });
+  const unsafeContract = new Map(createMarketToolContracts(unsafe.service, paths).map((contract) => [contract.name, contract]));
+  await assert.rejects(
+    () => unsafeContract.get('market_quotes')!.execute({ symbols: ['sh600000'] }, { signal }),
+    (error: unknown) => error instanceof MarketToolOutputError,
+  );
 });
 
 test('published input and output schemas close every object and enumerate supported values', async (t) => {
