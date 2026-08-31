@@ -4,7 +4,7 @@
 
 给 DSH 的 A/H 股只读行情层。
 
-把盘面交给数据，把判断留给模型。插件持续获取、整理并保存 A 股、港股、主要 A 股指数、恒生指数与恒生科技指数行情，再通过一组稳定的工具交给 DSH 使用。它不碰账户，不做交易，也不替你下结论。
+把盘面交给数据，把判断留给模型。插件持续获取、整理并保存 A 股、港股、主要 A 股指数、恒生指数与恒生科技指数行情，再通过一组稳定的工具交给 DSH 使用。它不接入账户，不执行交易；本项目及其输出均不构成投资建议。
 
 ## 安装
 
@@ -37,18 +37,23 @@
 
 ## 边界
 
-这是行情基础设施，不是交易终端。它不登录券商，不读取账户、持仓或交易信息，不下单，也不提供模拟交易。唯一由模型触发的本地状态变更，是维护插件自己的观察列表。它与 `dsh-stock-watch` 没有运行时或数据依赖。
+这是只读的行情信息基础设施，不是券商客户端、交易终端或投资顾问服务。插件不登录或连接证券账户，不读取账户、持仓及交易信息，不提交订单，也不提供实盘或模拟交易功能。唯一可由模型触发的本地状态变更，是维护插件自身的观察列表。它与 `dsh-stock-watch` 没有运行时或数据依赖。
 
-## 环境与许可
+## 环境
 
 - Windows 版 DSH Desktop，以及可用的受管 Desktop Profile。
 - Windows PowerShell 5.1 或 PowerShell 7。
 - Node.js `^22.19.0 || >=24.0.0`。
-- 仅限个人、非商业、只读研究使用，具体见[许可证](LICENSE)。
+
+## 许可与免责声明
+
+官方发行版仅许可用于个人、非商业、只读研究。许可证不授予修改、再分发、托管服务、商业使用或传播市场数据的权利；完整条款以[许可证](LICENSE)为准。
+
+腾讯和新浪并非本项目的合作方，也未授权或认可本项目。插件使用的非官方接口及其数据可能随时变更、中断、延迟、失准或停止提供。本项目不保证任何数据或输出的可用性、完整性、准确性、及时性、连续性及特定用途适用性。
+
+本项目及其输出仅供信息与研究参考，不构成投资、证券、财务、法律或其他专业建议，也不构成任何证券或金融产品的要约、招揽、推荐或保证。任何人不得将其作为交易或投资决策的唯一依据。使用者应自行核验数据，并自行负责遵守适用法律、监管要求及第三方服务条款；因使用或无法使用本项目产生的风险由使用者自行承担。
 
 Use is limited to personal, non-commercial, read-only research. Tencent and Sina are not partners of, and have not authorized, this project. Their unofficial interfaces may change, fail, or become unavailable without notice. You are responsible for compliance with applicable law and upstream terms. Nothing in this project or License grants third-party authorization or guarantees legal compliance.
-
-本项目不构成投资建议，也不承诺数据完整、准确、实时或适合交易。
 
 ## 文档
 
