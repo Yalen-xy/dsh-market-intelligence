@@ -1,11 +1,11 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFile, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { copyFile, link, lstat, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
-import { unzipSync } from 'fflate';
+import { unzipSync, zipSync } from 'fflate';
 import packageMetadata from '../package.json' with { type: 'json' };
 import { createClaudeManifest } from '../claude/manifest.js';
 
@@ -13,6 +13,7 @@ const executeFile = promisify(execFile);
 const rootDirectory = fileURLToPath(new URL('../', import.meta.url));
 const allowedArchiveFiles = ['LICENSE', 'manifest.json', 'server/index.js'];
 const localMcpbCli = path.join(rootDirectory, 'node_modules', '@anthropic-ai', 'mcpb', 'dist', 'cli', 'cli.js');
+const canonicalZipTimestamp = new Date(Date.UTC(1980, 0, 1, 0, 0, 0));
 
 export type ClaudeMcpbBuildResult = { output: string; sha256: string };
 export type ClaudeMcpbBuildOptions = { temporaryDirectory?: string };
@@ -20,7 +21,9 @@ export type ClaudeMcpbBuildOptions = { temporaryDirectory?: string };
 export async function buildClaudeMcpb(outputArgument: string, options: ClaudeMcpbBuildOptions = {}): Promise<ClaudeMcpbBuildResult> {
   const output = path.resolve(outputArgument);
   await assertNewOutputPath(output);
+  await assertSafeOutputParent(output);
   await mkdir(path.dirname(output), { recursive: true });
+  await assertSafeOutputParent(output);
   const temporaryDirectory = options.temporaryDirectory === undefined
     ? await mkdtemp(path.join(path.dirname(output), '.claude-mcpb-'))
     : path.resolve(options.temporaryDirectory);
@@ -31,7 +34,8 @@ export async function buildClaudeMcpb(outputArgument: string, options: ClaudeMcp
     const stagingDirectory = path.join(temporaryDirectory, 'package');
     const serverDirectory = path.join(stagingDirectory, 'server');
     const serverEntry = path.join(serverDirectory, 'index.js');
-    const packedOutput = path.join(temporaryDirectory, 'package.mcpb');
+    const packedOutput = path.join(temporaryDirectory, 'packed.mcpb');
+    const canonicalOutput = path.join(temporaryDirectory, 'package.mcpb');
     const unpackedDirectory = path.join(temporaryDirectory, 'unpacked');
     await mkdir(serverDirectory, { recursive: true });
     const result = await build({
@@ -67,15 +71,17 @@ export async function buildClaudeMcpb(outputArgument: string, options: ClaudeMcp
     await writeFile(path.join(stagingDirectory, 'manifest.json'), `${JSON.stringify(createClaudeManifest(packageMetadata.version), null, 2)}\n`, 'utf8');
     await runMcpbCli('validate', stagingDirectory);
     await runMcpbCli('pack', stagingDirectory, packedOutput);
-    const archive = await inspectArchive(packedOutput);
+    const archive = canonicalizeArchive(await readFile(packedOutput));
+    await writeFile(canonicalOutput, archive.bytes);
+    const canonicalArchive = inspectClaudeMcpbArchive(archive.bytes);
     await mkdir(unpackedDirectory);
-    await writeFile(path.join(unpackedDirectory, 'manifest.json'), archive['manifest.json']!);
+    await writeFile(path.join(unpackedDirectory, 'manifest.json'), canonicalArchive['manifest.json']!);
     await runMcpbCli('validate', unpackedDirectory);
-    inspectBundle(Buffer.from(archive['server/index.js']!).toString('utf8'));
-    const packedBytes = await readFile(packedOutput);
-    const sha256 = createHash('sha256').update(packedBytes).digest('hex');
+    inspectBundle(Buffer.from(canonicalArchive['server/index.js']!).toString('utf8'));
+    const sha256 = createHash('sha256').update(archive.bytes).digest('hex');
     await assertNewOutputPath(output);
-    await rename(packedOutput, output);
+    await assertSafeOutputParent(output);
+    await publishWithoutReplacement(canonicalOutput, output);
     completed = true;
     return { output, sha256 };
   } catch (error) {
@@ -96,6 +102,37 @@ async function assertNewOutputPath(output: string): Promise<void> {
   throw new Error('output target must not already exist');
 }
 
+async function assertSafeOutputParent(output: string): Promise<void> {
+  const parent = path.dirname(output);
+  const root = path.parse(parent).root;
+  const components = parent.slice(root.length).split(path.sep).filter((component) => component !== '');
+  let current = root;
+  for (const component of components) {
+    current = path.join(current, component);
+    try {
+      const entry = await lstat(current);
+      if (entry.isSymbolicLink()) throw new Error('output parent contains a symbolic link, junction, or reparse point');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+  }
+}
+
+async function publishWithoutReplacement(stagedArchive: string, output: string): Promise<void> {
+  try {
+    await link(stagedArchive, output);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('output target must not already exist');
+    throw error;
+  }
+  try {
+    await unlink(stagedArchive);
+  } catch {
+    throw new Error('output was published but the staged archive could not be removed');
+  }
+}
+
 function pathsOverlap(first: string, second: string): boolean {
   const relative = path.relative(second, first);
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
@@ -114,18 +151,68 @@ async function runMcpbCli(...arguments_: string[]): Promise<void> {
   }
 }
 
-async function inspectArchive(archivePath: string): Promise<Record<string, Uint8Array>> {
-  let archive: Record<string, Uint8Array>;
+export function inspectClaudeMcpbArchive(bytes: Uint8Array): Record<string, Uint8Array> {
+  parseCentralDirectory(bytes);
   try {
-    archive = unzipSync(await readFile(archivePath));
+    return unzipSync(bytes);
   } catch {
-    throw new Error('official MCPB pack produced an unreadable archive');
+    throw new Error('MCPB archive is unreadable');
   }
-  const actualNames = Object.keys(archive).sort();
-  if (actualNames.length !== allowedArchiveFiles.length || actualNames.some((name, index) => name !== allowedArchiveFiles[index])) {
-    throw new Error('MCPB archive contains noncanonical files');
+}
+
+function canonicalizeArchive(bytes: Uint8Array): { bytes: Uint8Array } {
+  const archive = inspectClaudeMcpbArchive(bytes);
+  const entries: Record<string, Uint8Array> = {};
+  for (const name of allowedArchiveFiles) entries[name] = archive[name]!;
+  const canonicalBytes = zipSync(entries, { level: 9, mtime: canonicalZipTimestamp });
+  parseCentralDirectory(canonicalBytes);
+  return { bytes: canonicalBytes };
+}
+
+function parseCentralDirectory(bytes: Uint8Array): void {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const endOffset = findEndOfCentralDirectory(bytes);
+  if (view.getUint16(endOffset + 4, true) !== 0 || view.getUint16(endOffset + 6, true) !== 0) throw new Error('MCPB archive uses multiple ZIP disks');
+  const entryCount = view.getUint16(endOffset + 10, true);
+  const centralSize = view.getUint32(endOffset + 12, true);
+  const centralOffset = view.getUint32(endOffset + 16, true);
+  if (entryCount === 0xffff || centralSize === 0xffffffff || centralOffset === 0xffffffff) throw new Error('MCPB archive uses unsupported ZIP64 records');
+  if (entryCount !== allowedArchiveFiles.length || centralOffset + centralSize !== endOffset) throw new Error('MCPB archive contains noncanonical files');
+  const names = new Set<string>();
+  let offset = centralOffset;
+  for (let index = 0; index < entryCount; index += 1) {
+    if (offset + 46 > endOffset || view.getUint32(offset, true) !== 0x02014b50) throw new Error('MCPB archive has an invalid central directory');
+    const flags = view.getUint16(offset + 8, true);
+    const nameLength = view.getUint16(offset + 28, true);
+    const extraLength = view.getUint16(offset + 30, true);
+    const commentLength = view.getUint16(offset + 32, true);
+    const diskStart = view.getUint16(offset + 34, true);
+    const externalAttributes = view.getUint32(offset + 38, true);
+    const entryEnd = offset + 46 + nameLength + extraLength + commentLength;
+    if ((flags & 1) !== 0 || diskStart !== 0 || entryEnd > endOffset) throw new Error('MCPB archive has an unsafe ZIP entry');
+    const name = Buffer.from(bytes.slice(offset + 46, offset + 46 + nameLength)).toString('utf8');
+    if (!allowedArchiveFiles.includes(name) || names.has(name) || name.includes('\\') || name.includes('..') || name.startsWith('/')) {
+      throw new Error('MCPB archive contains duplicate or noncanonical files');
+    }
+    assertOrdinaryZipFile(externalAttributes);
+    names.add(name);
+    offset = entryEnd;
   }
-  return archive;
+  if (offset !== endOffset || names.size !== allowedArchiveFiles.length) throw new Error('MCPB archive contains noncanonical files');
+}
+
+function assertOrdinaryZipFile(externalAttributes: number): void {
+  if ((externalAttributes & 0x10) !== 0) throw new Error('MCPB archive entry is not an ordinary file');
+  const fileType = (externalAttributes >>> 16) & 0o170000;
+  if (fileType !== 0 && fileType !== 0o100000) throw new Error('MCPB archive entry is not an ordinary file');
+}
+
+function findEndOfCentralDirectory(bytes: Uint8Array): number {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let offset = bytes.length - 22; offset >= Math.max(0, bytes.length - 65_557); offset -= 1) {
+    if (view.getUint32(offset, true) === 0x06054b50 && offset + 22 + view.getUint16(offset + 20, true) === bytes.length) return offset;
+  }
+  throw new Error('MCPB archive has no ZIP end-of-central-directory record');
 }
 
 function inspectBundle(bundle: string): void {
