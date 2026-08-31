@@ -1,6 +1,8 @@
 param(
   [Parameter(Mandatory = $true)][string]$Source,
-  [Parameter(Mandatory = $true)][string]$Destination
+  [Parameter(Mandatory = $true)][string]$Destination,
+  [string]$PinnedSignal = '',
+  [string]$ReleaseSignal = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +13,8 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Diagnostics;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 public static class ClaudeMcpbPublisher {
@@ -35,15 +39,19 @@ public static class ClaudeMcpbPublisher {
     string parent=Path.GetDirectoryName(Path.GetFullPath(destination)); string root=Path.GetPathRoot(parent); string current=root;
     string remainder=parent.Substring(root.Length); foreach(string part in remainder.Split(new[]{Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar}, StringSplitOptions.RemoveEmptyEntries)) { current=Path.Combine(current,part); if(!Directory.Exists(current)) yield break; yield return current; }
   }
-  public static void Publish(string source, string destination) {
+  public static void Publish(string source, string destination, string pinnedSignal, string releaseSignal) {
     var handles=new List<SafeFileHandle>();
     try {
       foreach(string ancestor in ExistingAncestors(destination)) handles.Add(Open(ancestor,true));
       handles.Add(Open(source,false));
+      if(!String.IsNullOrEmpty(pinnedSignal)) {
+        File.WriteAllText(pinnedSignal, "pinned"); Stopwatch timer=Stopwatch.StartNew();
+        while(!File.Exists(releaseSignal)) { if(timer.ElapsedMilliseconds > 10000) throw new TimeoutException("publication_test_hook_timeout"); Thread.Sleep(10); }
+      }
       if(!CreateHardLinkW(destination,source,IntPtr.Zero)) { int code=Marshal.GetLastWin32Error(); if(code==80 || code==183) throw new IOException("output_exists"); throw new Win32Exception(code); }
     } finally { for(int i=handles.Count-1;i>=0;--i) handles[i].Dispose(); }
   }
 }
 '@
 
-[ClaudeMcpbPublisher]::Publish([IO.Path]::GetFullPath($Source), [IO.Path]::GetFullPath($Destination))
+[ClaudeMcpbPublisher]::Publish([IO.Path]::GetFullPath($Source), [IO.Path]::GetFullPath($Destination), $PinnedSignal, $ReleaseSignal)

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -99,6 +99,45 @@ test('Claude MCPB builder publishes only one concurrent output without replaceme
   assert.deepEqual(Object.keys(inspectClaudeMcpbArchive(await readFile(output))).sort(), expectedFiles);
 });
 
+test('Claude MCPB publisher blocks output-parent replacement while pinned and releases handles after publication', async (t) => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'claude-mcpb-parent-race-test-'));
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const outputParent = path.join(temporaryDirectory, 'output-parent');
+  const movedParent = path.join(temporaryDirectory, 'moved-parent');
+  const outside = path.join(temporaryDirectory, 'outside');
+  const pinnedSignal = path.join(temporaryDirectory, 'pinned.signal');
+  const releaseSignal = path.join(temporaryDirectory, 'release.signal');
+  await Promise.all([mkdir(outputParent), mkdir(outside)]);
+  const output = path.join(outputParent, 'artifact.mcpb');
+  const build = buildClaudeMcpb(output, { publicationTestHook: { pinnedSignal, releaseSignal } });
+  await waitForSignal(pinnedSignal);
+
+  await assert.rejects(rename(outputParent, movedParent));
+  await assert.rejects(symlink(outside, outputParent, 'junction'));
+  await writeFile(releaseSignal, 'release');
+  await build;
+  assert.deepEqual(Object.keys(inspectClaudeMcpbArchive(await readFile(output))).sort(), expectedFiles);
+  await rename(outputParent, movedParent);
+});
+
+test('Claude MCPB publisher releases pinned handles after fail-if-exists publication failure', async (t) => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'claude-mcpb-parent-failure-test-'));
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const outputParent = path.join(temporaryDirectory, 'output-parent');
+  const movedParent = path.join(temporaryDirectory, 'moved-parent');
+  const pinnedSignal = path.join(temporaryDirectory, 'pinned.signal');
+  const releaseSignal = path.join(temporaryDirectory, 'release.signal');
+  await mkdir(outputParent);
+  const output = path.join(outputParent, 'artifact.mcpb');
+  const build = buildClaudeMcpb(output, { publicationTestHook: { pinnedSignal, releaseSignal } });
+  await waitForSignal(pinnedSignal);
+
+  await writeFile(output, 'racing destination');
+  await writeFile(releaseSignal, 'release');
+  await assert.rejects(build, /must not already exist/i);
+  await rename(outputParent, movedParent);
+});
+
 test('Claude MCPB builder rejects a junction in an output-parent ancestor', async (t) => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'claude-mcpb-junction-test-'));
   t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
@@ -195,4 +234,17 @@ function findEndOfCentralDirectory(archive: Uint8Array): number {
     if (view.getUint32(0, true) === 0x06054b50) return offset;
   }
   throw new Error('fixture has no ZIP end-of-central-directory record');
+}
+
+async function waitForSignal(signal: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (true) {
+    try {
+      await readFile(signal);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || Date.now() >= deadline) throw error;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
 }

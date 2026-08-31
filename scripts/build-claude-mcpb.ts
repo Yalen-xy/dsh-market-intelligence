@@ -16,7 +16,10 @@ const localMcpbCli = path.join(rootDirectory, 'node_modules', '@anthropic-ai', '
 const canonicalZipTimestamp = '1980-01-01T00:00:00';
 
 export type ClaudeMcpbBuildResult = { output: string; sha256: string };
-export type ClaudeMcpbBuildOptions = { temporaryDirectory?: string };
+export type ClaudeMcpbBuildOptions = {
+  temporaryDirectory?: string;
+  publicationTestHook?: { pinnedSignal: string; releaseSignal: string };
+};
 
 export async function buildClaudeMcpb(outputArgument: string, options: ClaudeMcpbBuildOptions = {}): Promise<ClaudeMcpbBuildResult> {
   const output = path.resolve(outputArgument);
@@ -81,7 +84,7 @@ export async function buildClaudeMcpb(outputArgument: string, options: ClaudeMcp
     const sha256 = createHash('sha256').update(archive.bytes).digest('hex');
     await assertNewOutputPath(output);
     await assertSafeOutputParent(output);
-    await publishWithoutReplacement(canonicalOutput, output);
+    await publishWithoutReplacement(canonicalOutput, output, options.publicationTestHook);
     completed = true;
     return { output, sha256 };
   } catch (error) {
@@ -119,11 +122,16 @@ async function assertSafeOutputParent(output: string): Promise<void> {
   }
 }
 
-async function publishWithoutReplacement(stagedArchive: string, output: string): Promise<void> {
+async function publishWithoutReplacement(
+  stagedArchive: string,
+  output: string,
+  testHook: ClaudeMcpbBuildOptions['publicationTestHook'],
+): Promise<void> {
   try {
     await executeFile('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
       path.join(rootDirectory, 'scripts', 'publish-claude-mcpb.ps1'), '-Source', stagedArchive, '-Destination', output,
+      ...(testHook === undefined ? [] : ['-PinnedSignal', testHook.pinnedSignal, '-ReleaseSignal', testHook.releaseSignal]),
     ], { cwd: rootDirectory, windowsHide: true });
   } catch (error) {
     if (String(error).includes('output_exists')) throw new Error('output target must not already exist');
