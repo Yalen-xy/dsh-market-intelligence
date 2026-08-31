@@ -388,7 +388,10 @@ const healthParameters = closedObject({});
 
 export function createMarketToolContracts(service: MarketToolsService, _paths: ToolPaths): readonly MarketToolContract[] {
   return [
-    contract('market_status', 'Use this tool before answering questions about whether today/current A-share or Hong Kong markets are open, closed, in auction, or being collected. Returns exchange session state, not prices.', statusParameters, OUTPUT_SCHEMAS.market_status, async (args) => projectToolOutput('market_status', () => projectStatus(service.status(args as { market?: 'CN' | 'HK' })))),
+    contract('market_status', 'Use this tool before answering questions about whether today/current A-share or Hong Kong markets are open, closed, in auction, or being collected. Returns exchange session state, not prices.', statusParameters, OUTPUT_SCHEMAS.market_status, async (args) => {
+      const result = service.status(args as { market?: 'CN' | 'HK' });
+      return projectToolOutput('market_status', () => projectStatus(result));
+    }),
     contract('market_quotes', 'Use this tool whenever the user asks about today/current/latest A-share or Hong Kong prices, indices, or market performance. For a broad market overview pass symbols ["sh000001","sz399001","sh000300","hkHSI","hkHSTECH"] and refresh true; it works both during trading and after close. Never claim market data is unavailable before calling this tool.', quotesParameters, OUTPUT_SCHEMAS.market_quotes, async (args, context) => {
       const input = args as { symbols?: string[]; refresh?: boolean };
       requireAtMost100(input.symbols, 'symbols');
@@ -428,7 +431,10 @@ export function createMarketToolContracts(service: MarketToolsService, _paths: T
       const result = await service.watchlist(request, context.signal);
       return projectToolOutput('market_watchlist', () => projectWatchlist(result));
     }),
-    contract('market_data_health', 'Use this tool to diagnose market data availability or provider failures. Do not infer that行情 is unavailable from shell/network limitations before checking this tool.', healthParameters, OUTPUT_SCHEMAS.market_data_health, async () => projectToolOutput('market_data_health', () => projectHealth(service.health()))),
+    contract('market_data_health', 'Use this tool to diagnose market data availability or provider failures. Do not infer that行情 is unavailable from shell/network limitations before checking this tool.', healthParameters, OUTPUT_SCHEMAS.market_data_health, async () => {
+      const result = service.health();
+      return projectToolOutput('market_data_health', () => projectHealth(result));
+    }),
   ];
 }
 
@@ -598,8 +604,8 @@ function projectQuotes(value: QuotesResult): QuotesResult {
   requireOutputCollection('market_quotes', 'conflicts', value.conflicts, 100);
   return {
     availability: value.availability,
-    items: value.items.map(projectQuote),
-    conflicts: value.conflicts.map(projectConflict),
+    items: value.items.map((item, index) => projectQuote(item, `items[${index}]`)),
+    conflicts: value.conflicts.map((conflict, index) => projectConflict(conflict, index)),
   };
 }
 
@@ -608,7 +614,7 @@ function projectSeries(value: SeriesResult, limit: number): ToolSeriesResult {
   return {
     availability: value.availability,
     source: value.source,
-    items: value.items.map(projectBar),
+    items: value.items.map((item, index) => projectBar(item, index)),
   };
 }
 
@@ -616,7 +622,7 @@ function projectSectors(value: SectorsResult, limit: number): ToolSectorsResult 
   requireOutputCollection('market_sectors', 'items', value.items, limit);
   return {
     availability: value.availability,
-    items: value.items.map(projectSector),
+    items: value.items.map((item, index) => projectSector(item, index)),
   };
 }
 
@@ -626,7 +632,7 @@ function projectAuction(value: AuctionServiceResult): AuctionServiceResult {
     availability: value.availability,
     phase: value.phase,
     reason: value.reason,
-    items: value.items.map(projectQuote),
+    items: value.items.map((item, index) => projectQuote(item, `items[${index}]`)),
   };
 }
 
@@ -635,13 +641,13 @@ function projectWatchlist(value: WatchlistResult): WatchlistResult {
   return { watchlist: value.watchlist.map((symbol) => symbol) };
 }
 
-function projectQuote(value: CanonicalQuote): CanonicalQuote {
+function projectQuote(value: CanonicalQuote, path: string): CanonicalQuote {
   return {
     symbol: value.symbol,
     name: value.name,
     market: value.market,
     currency: value.currency,
-    price: value.price,
+    price: projectNullableNumber(value.price, `${path}.price`),
     open: value.open,
     high: value.high,
     low: value.low,
@@ -658,11 +664,17 @@ function projectQuote(value: CanonicalQuote): CanonicalQuote {
   };
 }
 
-function projectConflict(value: SourceConflict): SourceConflict {
+function projectNullableNumber(value: unknown, path: string): number | null {
+  if (value === null) return null;
+  if (typeof value === 'number' && Number.isFinite(value) && !Object.is(value, -0)) return value;
+  throw new MarketToolOutputError([`"${path}" must be a finite JSON number`]);
+}
+
+function projectConflict(value: SourceConflict, conflictIndex: number): SourceConflict {
   const observations = value.observations.map((observation, index) => {
     const observed = observation.value;
     if (typeof observed !== 'number' && typeof observed !== 'string' && observed !== null) {
-      throw new MarketToolOutputError([`"conflicts[0].observations[${index}].value" must match exactly one oneOf branch (matched 0)`]);
+      throw new MarketToolOutputError([`"conflicts[${conflictIndex}].observations[${index}].value" must match exactly one oneOf branch (matched 0)`]);
     }
     return {
       source: observation.source,
@@ -678,10 +690,10 @@ function projectConflict(value: SourceConflict): SourceConflict {
   };
 }
 
-function projectBar(value: Bar): ToolBar {
+function projectBar(value: Bar, index: number): ToolBar {
   const interval: unknown = value.interval;
   if (!isSeriesInterval(interval)) {
-    throw new MarketToolOutputError(['items[].interval must be minute, day, week, or month']);
+    throw new MarketToolOutputError([`items[${index}].interval must be minute, day, week, or month`]);
   }
   return {
     symbol: value.symbol,
@@ -697,10 +709,10 @@ function projectBar(value: Bar): ToolBar {
   };
 }
 
-function projectSector(value: SectorObservation): ToolSector {
+function projectSector(value: SectorObservation, index: number): ToolSector {
   const category: unknown = value.category;
   if (!isSectorCategory(category)) {
-    throw new MarketToolOutputError(['items[].category must be industry or concept']);
+    throw new MarketToolOutputError([`items[${index}].category must be industry or concept`]);
   }
   return {
     id: value.id,

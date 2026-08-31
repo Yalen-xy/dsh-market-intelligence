@@ -385,6 +385,118 @@ test('canonical contracts preserve DSH defaults, normalization, validation, and 
   );
 });
 
+test('canonical contracts and DSH preserve normalized requests and AbortSignal identity', async (t) => {
+  const direct = serviceFixture();
+  const registry = serviceFixture();
+  const contracts = new Map(createMarketToolContracts(direct.service, paths).map((contract) => [contract.name, contract]));
+  const harness = await toolHarness(registry);
+  t.after(async () => { await harness.ctx.fiber.dispose(); });
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ['market_quotes', { symbols: ['600000', '700.HK'] }],
+    ['market_series', { symbol: 'HK700', interval: 'minute' }],
+    ['market_sectors', {}],
+    ['market_auction', { market: 'HK', symbols: ['700.HK'] }],
+    ['market_watchlist', { action: 'add', symbol: '700.HK' }],
+  ];
+  for (const [name, args] of cases) {
+    const directSignal = new AbortController().signal;
+    const registrySignal = new AbortController().signal;
+    await contracts.get(name)!.execute(args, { signal: directSignal });
+    const result = await execute(harness.ctx, name, args, registrySignal);
+    assert.equal(result.isError, false, textOf(result));
+    assert.deepEqual(direct.requests.at(-1)?.request, registry.requests.at(-1)?.request, name);
+    assert.equal(direct.signals.at(-1)?.signal, directSignal, name);
+    assert.equal(registry.signals.at(-1)?.signal, registrySignal, name);
+  }
+});
+
+test('status and health backend failures remain service failures through both adapters', async (t) => {
+  const direct = serviceFixture();
+  const registry = serviceFixture();
+  direct.service.status = () => { throw new Error('status backend unavailable'); };
+  direct.service.health = () => { throw new Error('health backend unavailable'); };
+  registry.service.status = () => { throw new Error('status backend unavailable'); };
+  registry.service.health = () => { throw new Error('health backend unavailable'); };
+  const contracts = new Map(createMarketToolContracts(direct.service, paths).map((contract) => [contract.name, contract]));
+  const harness = await toolHarness(registry);
+  t.after(async () => { await harness.ctx.fiber.dispose(); });
+  for (const [name, message] of [['market_status', 'status backend unavailable'], ['market_data_health', 'health backend unavailable']] as const) {
+    await assert.rejects(() => contracts.get(name)!.execute({}, { signal: new AbortController().signal }), (error: unknown) => {
+      assert.equal(error instanceof MarketToolOutputError, false);
+      assert.match(error instanceof Error ? error.message : '', new RegExp(message));
+      return true;
+    });
+    const definition = harness.ctx.tools.get(name)!;
+    await assert.rejects(() => definition.execute({}, { signal: new AbortController().signal } as never), (error: unknown) => {
+      assert.equal(error instanceof ToolOutputError, false);
+      assert.match(error instanceof Error ? error.message : '', new RegExp(message));
+      return true;
+    });
+    const result = await execute(harness.ctx, name, {});
+    assert.notEqual(result.error.info?.code, 'INVALID_TOOL_OUTPUT');
+  }
+});
+
+test('shared output errors preserve DSH paths for later collection items', async () => {
+  const invalidQuotes = {
+    ...quotesResult,
+    items: [{ ...quote, price: Number.NaN }],
+    conflicts: [quotesResult.conflicts[0]!, {
+      ...quotesResult.conflicts[0]!,
+      observations: [{ source: 'sina', marketTime: quote.marketTime, value: {} }],
+    }],
+  };
+  const direct = serviceFixture({ quotes: invalidQuotes });
+  const registry = serviceFixture({ quotes: invalidQuotes });
+  const contracts = new Map(createMarketToolContracts(direct.service, paths).map((contract) => [contract.name, contract]));
+  await assert.rejects(() => contracts.get('market_quotes')!.execute({ symbols: ['sh600000'] }, { signal: new AbortController().signal }), (error: unknown) => {
+    assert.equal(error instanceof MarketToolOutputError, true);
+    if (error instanceof MarketToolOutputError) assert.deepEqual(error.issues, ['"items[0].price" must be a finite JSON number']);
+    return true;
+  });
+  const harness = await toolHarness(registry);
+  try {
+    const definition = harness.ctx.tools.get('market_quotes')!;
+    await assert.rejects(() => definition.execute({ symbols: ['sh600000'] }, { signal: new AbortController().signal } as never), (error: unknown) => {
+      assert.equal(error instanceof ToolOutputError, true);
+      if (error instanceof ToolOutputError) assert.deepEqual(error.violations, ['"items[0].price" must be a finite JSON number']);
+      return true;
+    });
+  } finally {
+    await harness.ctx.fiber.dispose();
+  }
+});
+
+test('shared conflict projection reports the later conflict index exactly', async () => {
+  const invalidQuotes = {
+    ...quotesResult,
+    conflicts: [quotesResult.conflicts[0]!, {
+      ...quotesResult.conflicts[0]!,
+      observations: [{ source: 'sina', marketTime: quote.marketTime, value: {} }],
+    }],
+  };
+  const direct = serviceFixture({ quotes: invalidQuotes });
+  const registry = serviceFixture({ quotes: invalidQuotes });
+  const contracts = new Map(createMarketToolContracts(direct.service, paths).map((contract) => [contract.name, contract]));
+  const expected = ['"conflicts[1].observations[0].value" must match exactly one oneOf branch (matched 0)'];
+  await assert.rejects(() => contracts.get('market_quotes')!.execute({ symbols: ['sh600000'] }, { signal: new AbortController().signal }), (error: unknown) => {
+    assert.equal(error instanceof MarketToolOutputError, true);
+    if (error instanceof MarketToolOutputError) assert.deepEqual(error.issues, expected);
+    return true;
+  });
+  const harness = await toolHarness(registry);
+  try {
+    const definition = harness.ctx.tools.get('market_quotes')!;
+    await assert.rejects(() => definition.execute({ symbols: ['sh600000'] }, { signal: new AbortController().signal } as never), (error: unknown) => {
+      assert.equal(error instanceof ToolOutputError, true);
+      if (error instanceof ToolOutputError) assert.deepEqual(error.violations, expected);
+      return true;
+    });
+  } finally {
+    await harness.ctx.fiber.dispose();
+  }
+});
+
 test('published input and output schemas close every object and enumerate supported values', async (t) => {
   const harness = await toolHarness();
   t.after(async () => { await harness.ctx.fiber.dispose(); });
@@ -599,7 +711,7 @@ test('hostile output discriminators become deterministic ToolOutputError values 
     {
       name: 'market_series',
       args: { symbol: 'sh600000', interval: 'minute' },
-      expected: 'items[].interval must be minute, day, week, or month',
+      expected: 'items[0].interval must be minute, day, week, or month',
       override(discriminator: unknown): ResultOverrides {
         return { series: { ...seriesResult, items: [{ ...seriesResult.items[0]!, interval: discriminator }] } };
       },
@@ -607,7 +719,7 @@ test('hostile output discriminators become deterministic ToolOutputError values 
     {
       name: 'market_sectors',
       args: { category: 'industry' },
-      expected: 'items[].category must be industry or concept',
+      expected: 'items[0].category must be industry or concept',
       override(discriminator: unknown): ResultOverrides {
         return { sectors: { ...sectorsResult, items: [{ ...sectorsResult.items[0]!, category: discriminator }] } };
       },

@@ -2,7 +2,15 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createMarketToolContracts, type MarketToolsService } from '../src/tool-contracts.js';
 
-const service = {} as MarketToolsService;
+const service = {
+  status() { throw new Error('not called'); },
+  async quotes() { throw new Error('not called'); },
+  async series() { throw new Error('not called'); },
+  async sectors() { throw new Error('not called'); },
+  async auction() { throw new Error('not called'); },
+  async watchlist() { throw new Error('not called'); },
+  health() { throw new Error('not called'); },
+} satisfies MarketToolsService;
 
 test('canonical contracts expose exactly the seven DSH market tools', () => {
   const contracts = createMarketToolContracts(service, { config: 'D:\\fixture\\config.json' });
