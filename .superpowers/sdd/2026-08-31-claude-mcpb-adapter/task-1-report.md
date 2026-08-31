@@ -71,3 +71,19 @@
 - GREEN: `npm run build` passed.
 - GREEN: `node --import tsx --test test/tool-contracts.test.ts test/tools.test.ts test/type-surface.test.ts` passed: 27 tests, 27 passed, 0 failed.
 - Full regression: `npm test` exited 0: 431 tests, 431 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo; duration `122939.3508ms`.
+
+## Fix round 3
+
+### Changes
+
+- Recorded the `status` service request in the complete seven-method fixture and asserted its `{}` invocation in the all-seven direct/DSH success matrix.
+- Added a table-driven seven-tool invalid-input parity matrix covering closed-schema input, symbol count/range/market semantic checks, limit validation, conditional watchlist arguments, and health/status closed objects. Direct and DSH issues are asserted literally.
+- Added a table-driven seven-tool output-validation parity matrix spanning collection limits, nullable oneOf fields, later series/sector collection indexes, auction projection, watchlist scalar values, and nested health provider values.
+- Canonical contract execution now validates the shared input schema before semantic normalization, preserving the same exact issue text as the DSH adapter while retaining DSH validation as defense in depth.
+
+### RED/GREEN evidence
+
+- RED: `node --import tsx --test test/tools.test.ts` — 26 passed, 1 failed. The direct/DSH invalid-input table reported `Missing expected rejection`, proving that direct status/health closed-input schemas were not enforced.
+- GREEN: `npm run build` passed.
+- GREEN: `node --import tsx --test test/tool-contracts.test.ts test/tools.test.ts test/type-surface.test.ts` — 29 passed, 0 failed.
+- Full regression: `npm test` exited 0: 433 tests, 433 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo; duration `123570.8848ms`.

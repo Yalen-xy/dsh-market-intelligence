@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Context } from '@deepseek-ai/cordis';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
-import ToolRuntime, { defineTool, ToolOutputError, type JsonSchemaNode, type JsonValue } from '@deepseek-ai/dsh-tools';
+import ToolRuntime, { defineTool, ToolArgsError, ToolOutputError, type JsonSchemaNode, type JsonValue } from '@deepseek-ai/dsh-tools';
 import type { RuntimePaths } from '../src/config.js';
 import type {
   AuctionServiceResult,
@@ -209,8 +209,9 @@ function serviceFixture(overrides: ResultOverrides = {}) {
   const requests: Array<{ method: string; request: unknown }> = [];
   let watchlist = ['sh600000'];
   const service = {
-    status() {
+    status(request: unknown) {
       calls.push('status');
+      requests.push({ method: 'status', request });
       return overrides.status ?? structuredClone(statusResult);
     },
     async quotes(request: unknown, signal: AbortSignal) {
@@ -431,6 +432,69 @@ test('all seven canonical contracts return the same projected values as DSH', as
     const registryResult = await execute(harness.ctx, name, args, signal);
     assert.equal(registryResult.isError, false, textOf(registryResult));
     if (!registryResult.isError) assert.deepEqual(directValue, registryResult.value, name);
+  }
+  assert.deepEqual(direct.requests.find(({ method }) => method === 'status'), { method: 'status', request: {} });
+  assert.deepEqual(registry.requests.find(({ method }) => method === 'status'), { method: 'status', request: {} });
+});
+
+test('direct and DSH contracts report exact representative invalid-input issues', async (t) => {
+  const direct = serviceFixture();
+  const registry = serviceFixture();
+  const contracts = new Map(createMarketToolContracts(direct.service, paths).map((contract) => [contract.name, contract]));
+  const harness = await toolHarness(registry);
+  t.after(async () => { await harness.ctx.fiber.dispose(); });
+  const cases: Array<[string, Record<string, unknown>, string[]]> = [
+    ['market_status', { unexpected: true }, ['"unexpected" is not a declared property (additionalProperties: false)']],
+    ['market_quotes', { symbols: Array.from({ length: 101 }, () => 'sh600000') }, ['"symbols" must contain at most 100 items']],
+    ['market_series', { symbol: 'sh600000', interval: 'minute', start: '2026-08-27T11:00:00+08:00', end: '2026-08-27T10:00:00+08:00' }, ['"start" must represent an instant before "end"']],
+    ['market_sectors', { limit: 0 }, ['"limit" must be an integer from 1 to 10000']],
+    ['market_auction', { market: 'CN', symbols: ['hk00700'] }, ['"symbols" contains hk00700, which does not belong to market CN']],
+    ['market_watchlist', { action: 'get', symbol: 'sh600000' }, ['"symbol" is not a declared property when action is "get"']],
+    ['market_data_health', { unexpected: true }, ['"unexpected" is not a declared property (additionalProperties: false)']],
+  ];
+  for (const [name, args, expected] of cases) {
+    await assert.rejects(() => contracts.get(name)!.execute(args, { signal: new AbortController().signal }), (error: unknown) => {
+      assert.equal(error instanceof MarketToolArgsError, true, name);
+      if (error instanceof MarketToolArgsError) assert.deepEqual(error.issues, expected, name);
+      return true;
+    });
+    await assert.rejects(() => harness.ctx.tools.get(name)!.execute(args, { signal: new AbortController().signal } as never), (error: unknown) => {
+      assert.equal(error instanceof ToolArgsError, true, name);
+      if (error instanceof ToolArgsError) assert.deepEqual(error.violations, expected, name);
+      return true;
+    });
+  }
+});
+
+test('direct and DSH contracts report exact cross-tool output-validation issues', async (t) => {
+  const cases: Array<[string, Record<string, unknown>, ResultOverrides, string[]]> = [
+    ['market_status', {}, { status: { ...statusResult, markets: [...statusResult.markets, statusResult.markets[0]!] } }, ['markets contains 3 items; maximum is 2']],
+    ['market_quotes', { symbols: ['sh600000'] }, { quotes: { ...quotesResult, items: [{ ...quote, open: 'oops' }] } }, ['"items[0].open" must match exactly one oneOf branch (matched 0)']],
+    ['market_series', { symbol: 'sh600000', interval: 'minute' }, { series: { ...seriesResult, items: [seriesResult.items[0]!, { ...seriesResult.items[0]!, interval: 'hour' }] } }, ['items[1].interval must be minute, day, week, or month']],
+    ['market_sectors', {}, { sectors: { ...sectorsResult, items: [sectorsResult.items[0]!, { ...sectorsResult.items[0]!, category: 'region' }] } }, ['items[1].category must be industry or concept']],
+    ['market_auction', { market: 'CN' }, { auction: { ...auctionResult, items: [{ ...quote }, { ...quote, open: 'oops' }] } }, ['"items[1].open" must match exactly one oneOf branch (matched 0)']],
+    ['market_watchlist', { action: 'get' }, { watchlist: { watchlist: ['sh600000', 1] } }, ['"watchlist[1]" must be a string']],
+    ['market_data_health', {}, { health: { ...healthResult, providers: [...healthResult.providers, { ...healthResult.providers[0]!, errorCategory: 'bad' }] } }, ['"providers[1].errorCategory" must match exactly one oneOf branch (matched 0)']],
+  ];
+  for (const [name, args, overrides, expected] of cases) {
+    const direct = serviceFixture(overrides);
+    const registry = serviceFixture(overrides);
+    const contract = createMarketToolContracts(direct.service, paths).find((entry) => entry.name === name)!;
+    await assert.rejects(() => contract.execute(args, { signal: new AbortController().signal }), (error: unknown) => {
+      assert.equal(error instanceof MarketToolOutputError, true, name);
+      if (error instanceof MarketToolOutputError) assert.deepEqual(error.issues, expected, name);
+      return true;
+    });
+    const harness = await toolHarness(registry);
+    try {
+      await assert.rejects(() => harness.ctx.tools.get(name)!.execute(args, { signal: new AbortController().signal } as never), (error: unknown) => {
+        assert.equal(error instanceof ToolOutputError, true, name);
+        if (error instanceof ToolOutputError) assert.deepEqual(error.violations, expected, name);
+        return true;
+      });
+    } finally {
+      await harness.ctx.fiber.dispose();
+    }
   }
 });
 

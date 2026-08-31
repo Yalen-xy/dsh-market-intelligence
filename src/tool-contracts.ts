@@ -439,7 +439,17 @@ export function createMarketToolContracts(service: MarketToolsService, _paths: T
 }
 
 function contract(name: MarketToolName, description: string, inputSchema: JsonSchemaObject, outputSchema: JsonSchemaObject, execute: (args: unknown, context: MarketToolCallContext) => Promise<unknown>): MarketToolContract {
-  return { name, description, inputSchema, outputSchema, execute };
+  return {
+    name,
+    description,
+    inputSchema,
+    outputSchema,
+    async execute(args, context) {
+      const violations = validateJsonSchemaValue(inputSchema, args, '');
+      if (violations.length > 0) throw new MarketToolArgsError(violations);
+      return execute(args, context);
+    },
+  };
 }
 
 function closedObject(properties: Record<string, unknown>, required?: string[]): JsonSchemaObject {
