@@ -5,9 +5,12 @@ import { assertSafeLocalWindowsPath, getWindowsDriveType, requireLocalWindowsPat
 
 test('accepts normalized absolute paths on any Windows drive', () => {
   for (const value of [
+    'C:\\',
     'C:\\Users\\张三\\.dsh',
     'D:\\AI\\dsh',
     'Z:\\Research Data\\dsh-market-intelligence',
+    'E:\\Market\\dsh-market-intelligence.v2',
+    'F:\\ordinary.name\\report.txt',
   ]) assert.equal(requireLocalWindowsPath(value, 'path'), value);
 });
 
@@ -19,6 +22,24 @@ test('rejects non-local, non-normalized, and relative path forms', () => {
     'C:\\safe\\..\\escape',
     'C:/mixed/separators',
     'C:\\safe\\dsh:alternate-stream',
+  ]) assert.throws(() => requireLocalWindowsPath(value, 'path'), /local Windows path/i);
+});
+
+test('rejects Windows-unsafe trailing characters and reserved device components', () => {
+  for (const value of [
+    'C:\\safe.\\dsh',
+    'C:\\safe \\dsh',
+    'C:\\safe\\dsh.',
+    'C:\\safe\\dsh ',
+    'C:\\CON\\dsh',
+    'C:\\prn\\dsh',
+    'C:\\Aux\\dsh',
+    'C:\\safe\\NUL.txt',
+    'C:\\safe\\CLOCK$.json',
+    'C:\\safe\\COM1',
+    'C:\\safe\\com9.log',
+    'C:\\safe\\LPT1',
+    'C:\\safe\\lpt9.txt',
   ]) assert.throws(() => requireLocalWindowsPath(value, 'path'), /local Windows path/i);
 });
 

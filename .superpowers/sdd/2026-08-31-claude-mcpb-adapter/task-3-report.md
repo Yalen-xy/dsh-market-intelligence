@@ -63,3 +63,55 @@ Result: exit 0; 446 passed, 0 failed, 0 cancelled, 0 skipped. The Node test work
 ## Concerns
 
 None. Task 4 must pass both `readClaudeConfig()` and `resolveClaudeBaseDirectory()` into the existing `startMarketRuntime` safety boundary so the asynchronous fixed-drive and reparse checks execute before storage creation.
+
+## Fix round 1
+
+### Implementation
+
+Extended the shared `requireLocalWindowsPath` component validator to reject every non-root component that ends in a dot or space, contains an alternate data stream separator, or has a Windows reserved device stem. Reserved stems are checked case-insensitively and include `CON`, `PRN`, `AUX`, `NUL`, `CLOCK$`, `COM1` through `COM9`, and `LPT1` through `LPT9`, including ordinary extensions such as `NUL.txt`. Drive roots and ordinary dotted names remain accepted. The logic mirrors the repository's release-staging component policy without importing build-script code.
+
+Added the production `resolveDshBaseDirectory(environment)` seam and routed the production DSH dependency through it. The updated independence test passes hostile invalid Claude values to that DSH resolver and a hostile invalid `DSH_HOME` to both Claude resolvers, proving neither adapter consumes the other adapter's environment variables without starting a runtime.
+
+### TDD evidence
+
+RED:
+
+```text
+node --import tsx --test test/claude-config.test.ts test/paths.test.ts
+```
+
+Result: exit 1. The Claude test module failed because `src/index.ts` did not yet export `resolveDshBaseDirectory`; the direct path test failed because the old validator accepted trailing-dot/space and reserved-device components.
+
+GREEN:
+
+```text
+node --import tsx --test test/claude-config.test.ts test/paths.test.ts test/model-config.test.ts test/plugin-load.test.ts
+```
+
+Result: exit 0; 34 passed, 0 failed, 0 cancelled, 0 skipped. An initial unsandboxed run reached the expected test-created temporary-directory permission denial in `plugin-load.test.ts`; the scoped rerun above is the recorded GREEN evidence.
+
+### Verification
+
+```text
+npm run build
+```
+
+Result: exit 0.
+
+```text
+npm test
+```
+
+Result: exit 0; 447 passed, 0 failed, 0 cancelled, 0 skipped. The worker processes and temporary test directories had exited and cleaned up before staging.
+
+### Files
+
+- Modified: `src/paths.ts`, `src/index.ts`, `test/paths.test.ts`, `test/claude-config.test.ts`
+- Regenerated tracked output: `lib/paths.js`, `lib/index.js`, `lib/index.d.ts`
+
+### Self-review and concerns
+
+- Checked the component behavior against `scripts/stage-release.mjs`: trailing dot/space and the same reserved device stems are rejected, ordinary dotted names are accepted.
+- The production default DSH dependency calls the exported resolver; test-only configuration or runtime startup is unnecessary for the independence proof.
+- `git diff --check` passes.
+- No concerns.

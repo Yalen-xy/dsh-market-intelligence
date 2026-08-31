@@ -80,7 +80,7 @@ const systemClock: Clock = {
 };
 
 const defaultDependencies: PluginDependencies = {
-  getDshHome: () => process.env.DSH_HOME,
+  getDshHome: () => resolveDshBaseDirectory(process.env),
   assertSafePath: assertSafeLocalWindowsPath,
   mkdir,
   loadUserState,
@@ -175,6 +175,10 @@ function validateConfig(value: Record<string, unknown>): RuntimeConfig {
 function requireDshHome(value: unknown): string {
   if (typeof value !== 'string' || value.trim() === '') throw new Error('DSH_HOME must be a non-empty normalized absolute local Windows path');
   return requireLocalWindowsPath(value, 'DSH_HOME');
+}
+
+export function resolveDshBaseDirectory(environment: NodeJS.ProcessEnv): string {
+  return requireDshHome(environment.DSH_HOME);
 }
 
 function requireStorageDir(value: unknown): string {

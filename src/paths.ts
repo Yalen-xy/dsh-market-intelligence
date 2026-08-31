@@ -16,7 +16,7 @@ export function requireLocalWindowsPath(value: unknown, label: string, requiredB
     || !path.win32.isAbsolute(value)
     || !WINDOWS_DRIVE_ROOT.test(path.win32.parse(value).root)
     || path.win32.normalize(value) !== value
-    || hasAlternateDataStream(value)) {
+    || hasUnsafeWindowsComponent(value)) {
     throw new Error(`${label} must be a normalized absolute local Windows path`);
   }
   if (requiredBasename !== undefined && path.win32.basename(value).toLowerCase() !== requiredBasename.toLowerCase()) {
@@ -25,9 +25,14 @@ export function requireLocalWindowsPath(value: unknown, label: string, requiredB
   return value;
 }
 
-function hasAlternateDataStream(value: string): boolean {
+function hasUnsafeWindowsComponent(value: string): boolean {
   const root = path.win32.parse(value).root;
-  return value.slice(root.length).split('\\').some((segment) => segment.includes(':'));
+  return value.slice(root.length).split('\\').some((component) => {
+    if (component.length === 0) return false;
+    if (component.includes(':') || /[. ]$/.test(component)) return true;
+    const stem = component.split('.', 1)[0]!.toUpperCase();
+    return /^(CON|PRN|AUX|NUL|CLOCK\$|COM[1-9]|LPT[1-9])$/.test(stem);
+  });
 }
 
 export async function getWindowsDriveType(driveRoot: string, execFileImpl: typeof execFile = execFile): Promise<number> {

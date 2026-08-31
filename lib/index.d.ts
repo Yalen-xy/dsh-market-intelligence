@@ -25,4 +25,5 @@ export type PluginDependencies = Omit<MarketRuntimeOptions, 'baseDirectory'> & {
 };
 export declare function createApply(overrides?: Partial<PluginDependencies>): (ctx: Context, rawConfig: Config) => Promise<() => Promise<void>>;
 export declare function apply(ctx: Context, config: Config): Promise<() => Promise<void>>;
+export declare function resolveDshBaseDirectory(environment: NodeJS.ProcessEnv): string;
 export {};

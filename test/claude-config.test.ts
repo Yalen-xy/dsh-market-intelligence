@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readClaudeConfig, resolveClaudeBaseDirectory } from '../claude/config.ts';
-import { resolveRuntimePaths } from '../src/config.ts';
+import { resolveDshBaseDirectory } from '../src/index.ts';
 
 const LOCAL_APP_DATA = 'C:\\Users\\fixture\\AppData\\Local';
 
@@ -90,6 +90,8 @@ test('Claude rejects missing, blank, and unsafe LocalAppData or custom storage p
     ['UNC LocalAppData', { LOCALAPPDATA: '\\\\server\\share\\local' }],
     ['device LocalAppData', { LOCALAPPDATA: '\\\\?\\C:\\local' }],
     ['traversing LocalAppData', { LOCALAPPDATA: 'C:\\safe\\..\\local' }],
+    ['trailing LocalAppData component', { LOCALAPPDATA: 'C:\\Users\\fixture\\AppData.\\Local' }],
+    ['reserved LocalAppData component', { LOCALAPPDATA: 'C:\\Users\\fixture\\NUL.txt' }],
   ] as const) {
     assert.throws(() => resolveClaudeBaseDirectory(environment), /local Windows path/i, label);
     assert.throws(() => readClaudeConfig(environment), /local Windows path/i, label);
@@ -100,20 +102,30 @@ test('Claude rejects missing, blank, and unsafe LocalAppData or custom storage p
     ['device storage', { LOCALAPPDATA: LOCAL_APP_DATA, CLAUDE_MARKET_STORAGE_DIR: '\\\\?\\C:\\claude' }],
     ['traversing storage', { LOCALAPPDATA: LOCAL_APP_DATA, CLAUDE_MARKET_STORAGE_DIR: 'C:\\safe\\..\\claude' }],
     ['ADS storage', { LOCALAPPDATA: LOCAL_APP_DATA, CLAUDE_MARKET_STORAGE_DIR: 'C:\\safe\\claude:stream' }],
+    ['trailing storage component', { LOCALAPPDATA: LOCAL_APP_DATA, CLAUDE_MARKET_STORAGE_DIR: 'D:\\AI\\claude. ' }],
+    ['reserved storage component', { LOCALAPPDATA: LOCAL_APP_DATA, CLAUDE_MARKET_STORAGE_DIR: 'D:\\AI\\COM1.log' }],
   ] as const) {
     assert.throws(() => readClaudeConfig(environment), /local Windows path/i, label);
   }
 });
 
-test('DSH runtime paths ignore Claude environment names and retain their own base directory', () => {
-  const environment = {
+test('production DSH and Claude environment resolvers ignore hostile adapter-specific values', () => {
+  assert.equal(resolveDshBaseDirectory({
+    DSH_HOME: 'D:\\AI\\dsh',
+    CLAUDE_MARKET_STORAGE_DIR: '.\\unsafe-claude-storage',
+    CLAUDE_MARKET_REQUEST_TIMEOUT_MS: 'not-an-integer',
+    CLAUDE_MARKET_QUOTE_INTERVAL_MS: '999',
+    CLAUDE_MARKET_SECTOR_INTERVAL_MS: '900001',
+  }), 'D:\\AI\\dsh');
+  const claudeEnvironment = {
     LOCALAPPDATA: LOCAL_APP_DATA,
-    CLAUDE_MARKET_STORAGE_DIR: 'D:\\AI\\claude-market-intelligence',
-    CLAUDE_MARKET_REQUEST_TIMEOUT_MS: '120000',
+    DSH_HOME: '\\\\?\\C:\\unsafe-dsh-home',
   };
-  assert.deepEqual(resolveRuntimePaths('D:\\AI\\dsh'), {
-    root: 'D:\\AI\\dsh\\storages\\dsh-market-intelligence',
-    database: 'D:\\AI\\dsh\\storages\\dsh-market-intelligence\\market.sqlite',
-    config: 'D:\\AI\\dsh\\storages\\dsh-market-intelligence\\config.json',
-  }, JSON.stringify(environment));
+  assert.equal(resolveClaudeBaseDirectory(claudeEnvironment),
+    'C:\\Users\\fixture\\AppData\\Local\\dsh-market-intelligence\\claude');
+  assert.deepEqual(readClaudeConfig(claudeEnvironment), {
+    requestTimeoutMs: 10_000,
+    quoteIntervalMs: 10_000,
+    sectorIntervalMs: 60_000,
+  });
 });
