@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { test } from 'node:test';
 import { validateManifest } from '@anthropic-ai/mcpb/node';
 import { buildClaudeMcpb, inspectClaudeMcpbArchive } from '../scripts/build-claude-mcpb.ts';
 
 const expectedFiles = ['LICENSE', 'manifest.json', 'server/index.js'];
+const executeFile = promisify(execFile);
 
 test('Claude MCPB builder produces an officially valid self-contained Windows package', async (t) => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'claude-mcpb-test-'));
@@ -42,6 +45,24 @@ test('Claude MCPB builder canonicalizes identical inputs to byte-identical outpu
 
   assert.equal(first.sha256, second.sha256);
   assert.deepEqual(await readFile(firstOutput), await readFile(secondOutput));
+});
+
+test('Claude MCPB builder canonicalizes identical input bytes across timezones', async (t) => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'claude-mcpb-timezone-test-'));
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const outputs: string[] = [];
+  for (const timezone of ['UTC', 'Asia/Shanghai', 'America/New_York']) {
+    const output = path.join(temporaryDirectory, `${timezone.replace('/', '-')}.mcpb`);
+    await executeFile(process.execPath, ['--import', 'tsx', 'scripts/build-claude-mcpb.ts', '--output', output], {
+      cwd: process.cwd(),
+      env: { ...process.env, TZ: timezone },
+      windowsHide: true,
+    });
+    outputs.push(output);
+  }
+  const bytes = await Promise.all(outputs.map((output) => readFile(output)));
+  assert.deepEqual(bytes[0], bytes[1]);
+  assert.deepEqual(bytes[0], bytes[2]);
 });
 
 test('Claude MCPB builder fails closed for unsafe output targets', async (t) => {
@@ -124,6 +145,9 @@ test('Claude MCPB central-directory parser rejects duplicate and non-ordinary en
 
   assert.throws(() => inspectClaudeMcpbArchive(appendFirstCentralDirectoryEntry(archive)), /duplicate|exactly three|noncanonical/i);
   assert.throws(() => inspectClaudeMcpbArchive(markFirstCentralDirectoryEntryAsSymbolicLink(archive)), /ordinary/i);
+  for (const attribute of [0x08, 0x10, 0x40, 0x400]) {
+    assert.throws(() => inspectClaudeMcpbArchive(markFirstCentralDirectoryEntryWithDosAttribute(archive, attribute)), /ordinary/i);
+  }
 });
 
 function appendFirstCentralDirectoryEntry(archive: Uint8Array): Uint8Array {
@@ -153,6 +177,15 @@ function markFirstCentralDirectoryEntryAsSymbolicLink(archive: Uint8Array): Uint
   const view = new DataView(result.buffer, result.byteOffset, result.byteLength);
   const centralOffset = view.getUint32(eocdOffset + 16, true);
   view.setUint32(centralOffset + 38, 0o120000 << 16, true);
+  return result;
+}
+
+function markFirstCentralDirectoryEntryWithDosAttribute(archive: Uint8Array, attribute: number): Uint8Array {
+  const result = archive.slice();
+  const eocdOffset = findEndOfCentralDirectory(result);
+  const view = new DataView(result.buffer, result.byteOffset, result.byteLength);
+  const centralOffset = view.getUint32(eocdOffset + 16, true);
+  view.setUint32(centralOffset + 38, attribute, true);
   return result;
 }
 

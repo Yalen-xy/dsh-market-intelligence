@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFile, link, lstat, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -13,7 +13,7 @@ const executeFile = promisify(execFile);
 const rootDirectory = fileURLToPath(new URL('../', import.meta.url));
 const allowedArchiveFiles = ['LICENSE', 'manifest.json', 'server/index.js'];
 const localMcpbCli = path.join(rootDirectory, 'node_modules', '@anthropic-ai', 'mcpb', 'dist', 'cli', 'cli.js');
-const canonicalZipTimestamp = new Date(Date.UTC(1980, 0, 1, 0, 0, 0));
+const canonicalZipTimestamp = '1980-01-01T00:00:00';
 
 export type ClaudeMcpbBuildResult = { output: string; sha256: string };
 export type ClaudeMcpbBuildOptions = { temporaryDirectory?: string };
@@ -121,9 +121,12 @@ async function assertSafeOutputParent(output: string): Promise<void> {
 
 async function publishWithoutReplacement(stagedArchive: string, output: string): Promise<void> {
   try {
-    await link(stagedArchive, output);
+    await executeFile('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+      path.join(rootDirectory, 'scripts', 'publish-claude-mcpb.ps1'), '-Source', stagedArchive, '-Destination', output,
+    ], { cwd: rootDirectory, windowsHide: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('output target must not already exist');
+    if (String(error).includes('output_exists')) throw new Error('output target must not already exist');
     throw error;
   }
   try {
@@ -202,7 +205,8 @@ function parseCentralDirectory(bytes: Uint8Array): void {
 }
 
 function assertOrdinaryZipFile(externalAttributes: number): void {
-  if ((externalAttributes & 0x10) !== 0) throw new Error('MCPB archive entry is not an ordinary file');
+  const forbiddenDosAttributes = 0x08 | 0x10 | 0x40 | 0x400;
+  if ((externalAttributes & forbiddenDosAttributes) !== 0) throw new Error('MCPB archive entry is not an ordinary file');
   const fileType = (externalAttributes >>> 16) & 0o170000;
   if (fileType !== 0 && fileType !== 0o100000) throw new Error('MCPB archive entry is not an ordinary file');
 }
