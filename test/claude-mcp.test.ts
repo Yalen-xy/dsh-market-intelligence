@@ -73,6 +73,54 @@ test('rejects unknown tools and caller argument errors as invalid params', async
   }
 });
 
+test('maps every malformed tools/call envelope that reaches the server to bounded invalid params', async () => {
+  const fixture = createRuntimeFixture();
+  const managed = createClaudeMcpServer(() => fixture.runtime, memoryLogger());
+  const [rawClient, serverTransport] = InMemoryTransport.createLinkedPair();
+  const responses = new Map<number, unknown>();
+  rawClient.onmessage = (message) => {
+    if ('id' in message && typeof message.id === 'number') responses.set(message.id, message);
+  };
+  await rawClient.start();
+  await managed.server.connect(serverTransport);
+  const hostile = 'secret-token at D:\\Users\\fixture and <upstream-body>';
+  const malformed = [
+    {},
+    { params: {} },
+    { params: { name: null } },
+    { params: { name: 7 } },
+    { params: { name: ['market_quotes'] } },
+    { params: { name: 'market_quotes', arguments: [] } },
+    { params: { name: 'market_quotes', arguments: null } },
+    { params: { name: 'market_quotes', arguments: hostile } },
+    { params: { name: 'market_quotes', arguments: 7 } },
+    { params: { name: 'market_quotes', arguments: true } },
+  ] as const;
+  try {
+    for (const [index, envelope] of malformed.entries()) {
+      await rawClient.send({
+        jsonrpc: '2.0',
+        id: index + 1,
+        method: 'tools/call',
+        ...envelope,
+      } as never);
+    }
+    await waitFor(() => responses.size === malformed.length);
+    for (const id of malformed.keys().map((index) => index + 1)) {
+      assert.deepEqual(responses.get(id), {
+        jsonrpc: '2.0',
+        id,
+        error: { code: ErrorCode.InvalidParams, message: 'MCP error -32602: Invalid tools/call request' },
+      });
+    }
+    assert.equal(fixture.calls.length, 0);
+    assert.doesNotMatch(JSON.stringify([...responses.values()]), /secret-token|Users|upstream-body|expected|received|path/i);
+  } finally {
+    await managed.close();
+    await rawClient.close().catch(() => undefined);
+  }
+});
+
 test('maps service failures to a bounded tool error without serializing thrown values', async () => {
   const fixture = createRuntimeFixture();
   fixture.service.quotes = async () => { throw new Error('secret-token at D:\\Users\\fixture and <upstream-body>'); };

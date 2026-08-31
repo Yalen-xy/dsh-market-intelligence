@@ -35,11 +35,18 @@ export function createClaudeMcpServer(runtimeFactory: ClaudeRuntimeFactory, logg
     })),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const contract = contracts.find(({ name }) => name === request.params.name);
+  server.fallbackRequestHandler = async (request, extra) => {
+    if (request.method !== 'tools/call') {
+      throw new McpError(ErrorCode.MethodNotFound, 'Method not found');
+    }
+    const parsed = CallToolRequestSchema.safeParse(request);
+    if (!parsed.success) {
+      throw new McpError(ErrorCode.InvalidParams, 'Invalid tools/call request');
+    }
+    const contract = contracts.find(({ name }) => name === parsed.data.params.name);
     if (!contract) throw new McpError(ErrorCode.InvalidParams, 'Unknown market tool');
     try {
-      const result = await contract.execute(request.params.arguments ?? {}, { signal: extra.signal });
+      const result = await contract.execute(parsed.data.params.arguments ?? {}, { signal: extra.signal });
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result) }],
         structuredContent: result as Record<string, unknown>,
@@ -54,7 +61,7 @@ export function createClaudeMcpServer(runtimeFactory: ClaudeRuntimeFactory, logg
         content: [{ type: 'text' as const, text: 'Market data request failed' }],
       };
     }
-  });
+  };
 
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> => {
