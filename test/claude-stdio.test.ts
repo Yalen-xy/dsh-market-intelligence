@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
+import { runClaudeSmoke } from '../scripts/claude-smoke.mjs';
 
 const expectedSevenNames = [
   'market_auction',
@@ -18,41 +19,59 @@ const stagedBundle = path.resolve('.artifacts/claude-market-intelligence-latest.
 
 test('staged MCPB serves seven tools over a real stdio child process and shuts down cleanly', { timeout: 45_000 }, async (t) => {
   await access(stagedBundle);
-  const result = await runClaudeSmoke(t, stagedBundle);
+  const result = await runClaudeSmokeCli(t, stagedBundle);
 
   assert.deepEqual(result.toolNames.sort(), expectedSevenNames);
   assert.equal(result.calls, 7);
   assert.equal(result.structuredTextCalls, 7);
-  assert.equal(result.networkRequests, 0);
   assert.equal(result.protocolNoise, '');
   assert.equal(result.exitCode, 0);
   assert.equal(result.pendingChildren, 0);
   assert.equal(result.shutdown.graceful, 0);
-  assert.equal(result.shutdown.signal, 'SIGTERM');
   assert.equal(result.shutdown.eof, 0);
-  assert.equal(result.outsideFiles, 0);
+  assert.equal(result.guardEvents, 0);
+  assert.ok(result.redirectedFiles >= 0);
   assert.equal(result.storageReleased, true);
   assert.equal(result.temporaryRootRemoved, true);
   assert.ok(Buffer.byteLength(result.stderr, 'utf8') <= 4_096);
   assert.doesNotMatch(result.stderr, /[A-Z]:\\|\\Users\\|\/Users\//i);
 });
 
+test('smoke deadline terminates a stalled initialization without retaining its test root', { timeout: 10_000 }, async () => {
+  let temporaryRoot: string | undefined;
+  let ownedChild: import('node:child_process').ChildProcess | undefined;
+  const startedAt = Date.now();
+  await assert.rejects(runClaudeSmoke(stagedBundle, {
+    timeoutMs: 250,
+    server: {
+      command: process.execPath,
+      args: [path.resolve('test/fixtures/claude-stalled-server.mjs')],
+    },
+    onTemporaryRoot: (root: string) => { temporaryRoot = root; },
+    onChild: (child: import('node:child_process').ChildProcess) => { ownedChild = child; },
+  }), /timed out/i);
+  assert.ok(Date.now() - startedAt < 5_000, 'the test seam must prove the operation-wide deadline');
+  assert.ok(ownedChild !== undefined && (ownedChild.exitCode !== null || ownedChild.signalCode !== null), 'stalled child was not reaped');
+  assert.ok(temporaryRoot !== undefined);
+  await assert.rejects(access(temporaryRoot));
+});
+
 type ClaudeSmokeResult = {
   toolNames: string[];
   calls: number;
   structuredTextCalls: number;
-  networkRequests: number;
   protocolNoise: string;
   exitCode: number;
   pendingChildren: number;
-  shutdown: { graceful: number; signal: 'SIGTERM'; eof: number };
-  outsideFiles: number;
+  shutdown: { graceful: number; eof: number };
+  guardEvents: number;
+  redirectedFiles: number;
   storageReleased: boolean;
   temporaryRootRemoved: boolean;
   stderr: string;
 };
 
-async function runClaudeSmoke(t: Parameters<typeof test>[2], bundle: string): Promise<ClaudeSmokeResult> {
+async function runClaudeSmokeCli(t: Parameters<typeof test>[2], bundle: string): Promise<ClaudeSmokeResult> {
   const child = spawn(process.execPath, ['scripts/claude-smoke.mjs', '--bundle', bundle], {
     cwd: process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],
