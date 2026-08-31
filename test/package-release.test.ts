@@ -117,13 +117,23 @@ test('installation documentation matches installer behavior and recovery boundar
   const readme = await readFile(path.join(root, 'README.md'), 'utf8');
   const installGuide = await readFile(path.join(root, 'docs', 'INSTALL.md'), 'utf8');
   const installerReadme = await readFile(path.join(root, 'installer', 'README.md'), 'utf8');
+  const claudeGuide = await readFile(path.join(root, 'docs', 'CLAUDE.md'), 'utf8');
+  const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')) as { version: string };
   const combined = [readme, installGuide, installerReadme].join('\n');
 
   for (const parameter of ['-DshHome', '-DshCommand', '-Version', '-AllowDowngrade', '-AcceptLicense', '-WhatIf']) {
     assert.match(installGuide, new RegExp(parameter.replace('-', '\\-'), 'i'));
   }
   assert.match(installGuide, /does not expose a `-StorageRoot` parameter/i);
-  assert.match(combined, /DSH Desktop[^\n]*(?:running|退出|关闭)[^\n]*(?:refus|拒绝|停止)/i);
+  assert.match(installGuide, /DeepSeek Harness \(DSH\).*closed before mutation/i);
+  assert.match(installGuide, /If the DSH host is running[^\n]*installer refuses to mutate the profile/i);
+  assert.match(installGuide, /does not stop or restart processes/i);
+  assert.match(installGuide, new RegExp(packageJson.version.replace(/\./g, '\\.')));
+  assert.match(installGuide, /claude-market-intelligence-latest\.mcpb/);
+  assert.doesNotMatch(installGuide, /0\.1\.(?:0|1)/);
+  for (const [name, content] of [['README.md', readme], ['docs/INSTALL.md', installGuide], ['docs/CLAUDE.md', claudeGuide]] as const) {
+    assert.doesNotMatch(content, /DSH Desktop/i, name);
+  }
   assert.match(installGuide, /manual|手动/i);
   assert.match(installGuide, /offline|离线/i);
   assert.match(installGuide, /upgrade|升级/i);
