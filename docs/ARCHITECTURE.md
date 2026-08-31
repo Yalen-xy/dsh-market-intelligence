@@ -1,6 +1,12 @@
 # Architecture
 
-DSH Market Intelligence is a local, read-only market-data plugin hosted by the DSH Desktop Cordis runtime. It separates external data acquisition, normalization, persistence, scheduling, and model-visible tool projection so that a failure in one boundary remains observable and does not silently corrupt another.
+DSH Market Intelligence is a local, read-only market-data product with a shared market core and thin host adapters. The DSH adapter runs in the DeepSeek Harness Cordis runtime; the Claude adapter runs as a Windows MCPB extension. Both preserve the same tool contract while keeping host lifecycle and persistence separate.
+
+## Shared core and adapters
+
+One repository, semantic version, tag-based GitHub Release, license, changelog, and CI serve every adapter. Each Release provides the latest DSH ZIP and Claude MCPB assets; historical tags remain available for audit and rollback. The platform-neutral shared core owns providers, HTTP policy, calendar, scheduler, models, symbol normalization, SQLite semantics, retention, service behavior, and canonical tools. Adapters only translate that contract into their host registry and lifecycle.
+
+The DSH and Claude adapters never share a live SQLite database, watchlist, configuration, logs, or scheduler. A future Codex adapter is planned and reserved at this boundary; no Codex adapter is currently available.
 
 ## Data flow
 
@@ -9,13 +15,13 @@ Tencent Finance ─┐
                  ├─ fixed-host HTTP policy ─ provider adapters ─ normalization
 Sina Finance ────┘                                      │
                                                         ▼
-                                               MarketService
-                                              /      |       \
-                                             /       |        \
-                                    MarketScheduler  |   DSH tool registry
-                                             │       |        │
-                                             ▼       ▼        ▼
-                                      SQLite repository   seven JSON tools
+                                               shared MarketService
+                                              /          |          \
+                                             /           |           \
+                                    MarketScheduler      |     canonical seven tools
+                                             │           |           │
+                                             ▼           ▼           ▼
+                                  host-specific SQLite state   DSH / Claude adapters
                                              │
                                              ▼
                                   close maintenance / retention
@@ -25,6 +31,9 @@ Sina Finance ────┘                                      │
 
 | Component | Location | Responsibility |
 | --- | --- | --- |
+| Shared core | `src/` | Holds host-neutral provider, storage, schedule, service, model, and tool behavior without host SDK imports. |
+| DSH adapter | `src/index.ts`, `src/tools.ts` | Maps the canonical tools and lifecycle to DeepSeek Harness and SchemActery. |
+| Claude adapter | `claude/` | Maps the canonical tools and lifecycle to Windows MCP stdio and MCPB metadata. |
 | Cordis lifecycle | `src/index.ts` | Validates configuration, creates dependencies, registers the plugin, and disposes resources in order. |
 | Tool boundary | `src/tools.ts` | Defines seven closed JSON input/output schemas and rejects lossy or invalid results. |
 | Service layer | `src/service.ts` | Orchestrates providers, cache fallback, source conflicts, persistence, watchlist changes, health, and recovery. |
@@ -40,7 +49,7 @@ Sina Finance ────┘                                      │
 
 The repository stores raw quote observations, compacted minute and daily bars, sector observations and summaries, provider health, maintenance results, collection gaps, and crash-consistent recovery cursors. Writes that advance recovery state and persist the represented market data share one transaction.
 
-SQLite runtime files and `config.json` live under the configured plugin storage root. They are runtime state and are intentionally excluded from Git and npm packages.
+SQLite runtime files and `config.json` live under each adapter's configured storage root. DSH and Claude roots are independent runtime state; neither adapter imports, migrates, or synchronizes the other's data. They are intentionally excluded from Git, npm packages, and the MCPB package.
 
 ## Safety boundaries
 
@@ -58,4 +67,4 @@ On restart, durable per-market cursors determine which closed session segments h
 
 ## Test strategy
 
-The test suite covers calendar boundaries, provider parsing, fixed-request security, shared concurrency, tool schemas, JSON safety, SQLite transactions and migrations, scheduler cancellation, recovery idempotency, retention, package metadata, Cordis lifecycle, smoke scripts, and a synthetic full trading day with 100 A/H watchlist symbols plus fixed indices.
+The test suite covers calendar boundaries, provider parsing, fixed-request security, shared concurrency, tool schemas, JSON safety, SQLite transactions and migrations, scheduler cancellation, recovery idempotency, retention, package metadata, DSH and Claude lifecycle, adapter contract parity, MCP stdio framing, and a synthetic full trading day with 100 A/H watchlist symbols plus fixed indices.

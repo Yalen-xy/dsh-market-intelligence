@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. The project follows semantic versioning for repository releases.
 
+## [0.2.0] - 2026-08-31
+
+### Added
+
+- Windows-only `claude-market-intelligence-latest.mcpb` extension with the same seven read-only market tools as the DeepSeek Harness adapter.
+- Claude Desktop installation, isolated-storage, diagnostics, uninstall, provider-risk, privacy, and legal-boundary documentation.
+
+### Changed
+
+- Unified DSH and Claude under one repository semantic version, tag-based GitHub Release, license, changelog, CI, and latest customer download policy; historical tags remain for audit and rollback.
+- Documented the shared market-core and thin-adapter boundary, with a future Codex adapter reserved but not yet available.
+
 ## [0.1.1] - 2026-08-31
 
 ### Added

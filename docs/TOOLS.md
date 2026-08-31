@@ -1,6 +1,8 @@
 # Tool reference
 
-All tools use closed JSON-object schemas. Unknown parameters are rejected. Successful results contain only plain lossless JSON values; unavailable data is represented explicitly instead of being fabricated.
+All tools use closed JSON-object schemas. Unknown parameters are rejected. Successful results contain only plain lossless JSON values; unavailable data is represented explicitly instead of being fabricated. DeepSeek Harness and Claude expose the same seven tool names and behavior, but maintain independent local databases, watchlists, configuration, logs, and scheduler state.
+
+The tools are read-only with respect to brokerage and trading systems: they do not access accounts, positions, or orders, and do not place real or simulated trades. `market_watchlist` may change only the invoking adapter's own local watchlist.
 
 ## `market_status`
 

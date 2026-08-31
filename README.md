@@ -8,6 +8,8 @@
 
 ## 安装
 
+### DeepSeek Harness
+
 [下载最新版 Windows 插件安装包](https://github.com/Yalen-xy/dsh-market-intelligence/releases/latest/download/dsh-market-intelligence-latest.zip)
 
 1. 正常退出 DeepSeek Harness。
@@ -17,6 +19,12 @@
 5. 重新启动 DeepSeek Harness。
 
 安装器会寻找 DSH 当前使用的受管 Profile，校验发布文件，并在动手前留下可恢复的备份。遇到仍在运行的 DSH 进程、校验失败或无法确认的安装环境时，它会直接停下。指定数据目录、升级、卸载和恢复见[安装与恢复指南](docs/INSTALL.md)。
+
+### Claude Desktop
+
+[下载最新版 Claude Windows 扩展](https://github.com/Yalen-xy/dsh-market-intelligence/releases/latest/download/claude-market-intelligence-latest.mcpb)
+
+该 `.mcpb` 扩展仅支持 Windows，不依赖 DSH 运行，也不需要手动执行 npm 或编写 JSON 配置。Claude 的安装、独立存储、诊断与卸载见 [Claude Desktop 指南](docs/CLAUDE.md)。
 
 ## 它提供什么
 
@@ -58,6 +66,7 @@ Use is limited to personal, non-commercial, read-only research. Tencent and Sina
 ## 文档
 
 - [安装、升级、卸载与恢复](docs/INSTALL.md)
+- [Claude Desktop 安装、配置与诊断](docs/CLAUDE.md)
 - [七个工具的参数和返回值](docs/TOOLS.md)
 - [架构和数据流](docs/ARCHITECTURE.md)
 - [安全边界和漏洞报告](SECURITY.md)

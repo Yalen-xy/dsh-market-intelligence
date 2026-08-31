@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-The current `0.1.x` line is under active private development. Security fixes are applied to the latest repository version; older commits are retained for audit and rollback but are not independently maintained.
+The current `0.2.0` repository version is supported. One semantic version and tag-based GitHub Release govern both the DeepSeek Harness ZIP and Claude MCPB; security fixes are applied to the latest repository version. Historical tags and Releases are retained for audit and rollback but are not independently maintained.
 
 ## Reporting a vulnerability
 
@@ -31,4 +31,4 @@ The repository being publicly visible, a Release hash matching, or an endpoint b
 
 Use only a GitHub Release bootstrap that verifies `install.ps1` against `SHA256SUMS.txt` before execution. The installer then verifies the versioned tgz independently. Both files share the GitHub trust domain, so these checks detect corruption or mismatched assets but do not protect against compromise of the repository or GitHub account.
 
-The installer refuses profile mutation while an owned DSH Desktop process is running, delegates changes to a verified managed CLI, preserves unrelated plugins and market storage, and retains verified backup/log material for rollback diagnosis. Do not publish backup manifests, logs, profiles, or diagnostic archives without inspecting them for private paths and local metadata.
+The installer refuses profile mutation while an owned DeepSeek Harness process is running, delegates changes to a verified managed CLI, preserves unrelated plugins and market storage, and retains verified backup/log material for rollback diagnosis. Do not publish backup manifests, logs, profiles, or diagnostic archives without inspecting them for private paths and local metadata.
