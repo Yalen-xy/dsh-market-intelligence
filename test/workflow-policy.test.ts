@@ -73,6 +73,7 @@ test('Release validates the package and both PowerShell environments before publ
     [...publishCommand.matchAll(/\.release\\[^\s`]+/g)].map(([asset]) => asset),
     [
       '.release\\dsh-market-intelligence-${version}.tgz',
+      '.release\\dsh-market-intelligence-latest.zip',
       '.release\\install.ps1',
       '.release\\uninstall.ps1',
       '.release\\SHA256SUMS.txt',

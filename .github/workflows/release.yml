@@ -83,14 +83,15 @@ jobs:
           $version = $env:GITHUB_REF_NAME.Substring(1)
           $expectedAssets = @(
             ".release\dsh-market-intelligence-${version}.tgz"
+            '.release\dsh-market-intelligence-latest.zip'
             '.release\install.ps1'
             '.release\uninstall.ps1'
             '.release\SHA256SUMS.txt'
             '.release\LICENSE.txt'
           )
           $releaseEntries = @(Get-ChildItem -LiteralPath .release -Force)
-          if ($releaseEntries.Count -ne 5 -or @($releaseEntries | Where-Object { $_.PSIsContainer }).Count -ne 0) {
-            throw 'staged release must contain exactly five files'
+          if ($releaseEntries.Count -ne 6 -or @($releaseEntries | Where-Object { $_.PSIsContainer }).Count -ne 0) {
+            throw 'staged release must contain exactly six files'
           }
           foreach ($asset in $expectedAssets) {
             if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
@@ -99,6 +100,7 @@ jobs:
           }
           gh release create $env:GITHUB_REF_NAME `
             .release\dsh-market-intelligence-${version}.tgz `
+            .release\dsh-market-intelligence-latest.zip `
             .release\install.ps1 `
             .release\uninstall.ps1 `
             .release\SHA256SUMS.txt `

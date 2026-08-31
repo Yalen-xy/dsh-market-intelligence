@@ -18,7 +18,7 @@ Relative, UNC/network, device, removable-drive, non-normalized, traversal, and u
 
 ## Verified bootstrap
 
-The copyable latest and pinned `v0.1.0` commands are in the [root README](../README.md#一键安装). Each command:
+Normal users should use the fixed-name latest ZIP linked from the [root README](../README.md#下载最新版), extract it, and double-click `INSTALL.cmd`. The advanced commands in this guide:
 
 1. creates a new GUID-named directory under the current user's temporary root;
 2. downloads `install.ps1` and `SHA256SUMS.txt` from the same Release;
@@ -51,8 +51,8 @@ The installer does not expose a `-StorageRoot` parameter. With no bundle-level `
 Examples after separately downloading and verifying the script:
 
 ```powershell
-& .\install.ps1 -Version '0.1.0' -ReleaseApiUri 'https://api.github.com/repos/Yalen-xy/dsh-market-intelligence/releases/tags/v0.1.0' -AcceptLicense -DshHome 'E:\DSH\data'
-& .\install.ps1 -Version '0.1.0' -ReleaseApiUri 'https://api.github.com/repos/Yalen-xy/dsh-market-intelligence/releases/tags/v0.1.0' -AcceptLicense -DshHome 'E:\DSH\data' -WhatIf
+& .\install.ps1 -Version '0.1.1' -ReleaseApiUri 'https://api.github.com/repos/Yalen-xy/dsh-market-intelligence/releases/tags/v0.1.1' -AcceptLicense -DshHome 'E:\DSH\data'
+& .\install.ps1 -Version '0.1.1' -ReleaseApiUri 'https://api.github.com/repos/Yalen-xy/dsh-market-intelligence/releases/tags/v0.1.1' -AcceptLicense -DshHome 'E:\DSH\data' -WhatIf
 ```
 
 ## Manual download and offline hash verification
@@ -69,7 +69,7 @@ Inspect `LICENSE.txt`, then verify each of the other four files against its exac
 
 ```powershell
 $manifest = [IO.File]::ReadAllLines((Join-Path $PWD 'SHA256SUMS.txt'))
-$names = @('install.ps1', 'uninstall.ps1', 'LICENSE.txt', 'dsh-market-intelligence-0.1.0.tgz')
+$names = @('install.ps1', 'uninstall.ps1', 'LICENSE.txt', 'dsh-market-intelligence-0.1.1.tgz')
 foreach ($name in $names) {
   $escaped = [regex]::Escape($name)
   $rows = @($manifest | Where-Object { $_ -cmatch ("\A[0-9A-Fa-f]{64}  " + $escaped + "\z") })

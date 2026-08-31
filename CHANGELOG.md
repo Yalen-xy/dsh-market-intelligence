@@ -2,20 +2,22 @@
 
 All notable changes to this project are documented here. The project follows semantic versioning for repository releases.
 
-## [Unreleased]
+## [0.1.1] - 2026-08-31
 
 ### Added
 
 - Integrity-checked Windows PowerShell installation, reinstall, upgrade, explicit downgrade, rollback, and uninstall flows for GitHub Releases.
 - Latest and pinned one-command bootstraps that verify `install.ps1` before execution and preserve the installer's independent tgz verification.
-- Tag-only Windows Release automation with PowerShell 5.1/7 gates and deterministic five-asset staging.
+- Tag-only Windows Release automation with PowerShell 5.1/7 gates and deterministic six-asset staging.
 - Installation and recovery documentation covering discovery overrides, `-WhatIf`, retained storage, audit logs, and post-restart seven-tool verification.
+- A fixed-name `dsh-market-intelligence-latest.zip` customer download with a double-click `INSTALL.cmd` entry point.
 
 ### Changed
 
 - Generalized `DSH_HOME` and explicit storage validation to normalized absolute paths on any local fixed disk without migrating existing data.
 - Removed workstation-specific storage configuration from the packaged bundle.
 - Replaced private-development wording with the Personal Non-Commercial Limited Use License and explicit unresolved Tencent/Sina authorization and stability warnings.
+- Replaced README bootstrap code with one stable latest-download link and a concise product, architecture, and safety overview.
 
 ## [0.1.0] - 2026-08-28
 

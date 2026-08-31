@@ -24,6 +24,8 @@ const requiredPackageEntries = [
   'package/cordis.patch.yml',
   'package/LICENSE',
 ];
+const customerArchiveName = 'dsh-market-intelligence-latest.zip';
+const customerLauncherName = 'INSTALL.cmd';
 
 export async function stageRelease({ tag, packagePath, outputDirectory, rootDirectory = projectRoot() }) {
   const version = parseStableTag(tag);
@@ -50,7 +52,14 @@ export async function stageRelease({ tag, packagePath, outputDirectory, rootDire
     validatePackageMetadata(metadata, version);
     const manifest = await createManifest(temporaryOutput, sourceAssets.map((asset) => asset.destination));
     await writeFile(path.join(temporaryOutput, 'SHA256SUMS.txt'), manifest, { flag: 'wx' });
-    await verifyStagedAssets(temporaryOutput, sourceAssets.map((asset) => asset.destination), manifest);
+    const customerArchive = await createCustomerArchive(temporaryOutput, version, sourceAssets.map((asset) => asset.destination));
+    await writeFile(path.join(temporaryOutput, customerArchiveName), customerArchive, { flag: 'wx' });
+    await verifyStagedAssets(
+      temporaryOutput,
+      sourceAssets.map((asset) => asset.destination),
+      manifest,
+      [customerArchiveName],
+    );
     await assertOutputTargetAbsent(output);
     await rename(temporaryOutput, output);
   } catch (error) {
@@ -210,8 +219,100 @@ async function createManifest(directory, assetNames) {
     .join('\n')}\n`;
 }
 
-async function verifyStagedAssets(directory, assetNames, manifest) {
-  const expectedNames = [...assetNames, 'SHA256SUMS.txt'].sort();
+async function createCustomerArchive(directory, version, assetNames) {
+  const releaseApiUri = `https://api.github.com/repos/Yalen-xy/dsh-market-intelligence/releases/tags/v${version}`;
+  const launcher = Buffer.from([
+    '@echo off',
+    'setlocal',
+    'cd /d "%~dp0"',
+    'set "POWERSHELL=%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"',
+    'if not exist "%POWERSHELL%" set "POWERSHELL=pwsh.exe"',
+    `"%POWERSHELL%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" -Version "${version}" -ReleaseApiUri "${releaseApiUri}"`,
+    'set "INSTALL_EXIT=%ERRORLEVEL%"',
+    'echo.',
+    'if "%INSTALL_EXIT%"=="0" (echo Installation finished. Restart DSH Desktop.) else (echo Installation failed with exit code %INSTALL_EXIT%.)',
+    'echo.',
+    'pause',
+    'exit /b %INSTALL_EXIT%',
+    '',
+  ].join('\r\n'), 'utf8');
+  const entries = await Promise.all(
+    [...assetNames, 'SHA256SUMS.txt'].map(async (name) => ({ name, bytes: await readFile(path.join(directory, name)) })),
+  );
+  entries.push({ name: customerLauncherName, bytes: launcher });
+  entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+  return createStoredZip(entries);
+}
+
+function createStoredZip(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let localOffset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, 'utf8');
+    const bytes = Buffer.from(entry.bytes);
+    const checksum = crc32(bytes);
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0x0800, 6);
+    localHeader.writeUInt16LE(0, 8);
+    localHeader.writeUInt16LE(0, 10);
+    localHeader.writeUInt16LE(0x0021, 12);
+    localHeader.writeUInt32LE(checksum, 14);
+    localHeader.writeUInt32LE(bytes.length, 18);
+    localHeader.writeUInt32LE(bytes.length, 22);
+    localHeader.writeUInt16LE(name.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+    localParts.push(localHeader, name, bytes);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0x0800, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt16LE(0, 12);
+    centralHeader.writeUInt16LE(0x0021, 14);
+    centralHeader.writeUInt32LE(checksum, 16);
+    centralHeader.writeUInt32LE(bytes.length, 20);
+    centralHeader.writeUInt32LE(bytes.length, 24);
+    centralHeader.writeUInt16LE(name.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(localOffset, 42);
+    centralParts.push(centralHeader, name);
+    localOffset += localHeader.length + name.length + bytes.length;
+  }
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(localOffset, 16);
+  end.writeUInt16LE(0, 20);
+  return Buffer.concat([...localParts, centralDirectory, end]);
+}
+
+function crc32(bytes) {
+  let value = 0xffffffff;
+  for (const byte of bytes) {
+    value ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value >>> 1) ^ ((value & 1) === 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+async function verifyStagedAssets(directory, assetNames, manifest, additionalAssets = []) {
+  const expectedNames = [...assetNames, 'SHA256SUMS.txt', ...additionalAssets].sort();
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });

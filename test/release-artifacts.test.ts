@@ -23,8 +23,18 @@ const expectedAssets = [
   'LICENSE.txt',
   'SHA256SUMS.txt',
   'dsh-market-intelligence-0.1.0.tgz',
+  'dsh-market-intelligence-latest.zip',
   'install.ps1',
   'uninstall.ps1',
+];
+
+const expectedCustomerArchiveEntries = [
+  'LICENSE.txt',
+  'SHA256SUMS.txt',
+  'dsh-market-intelligence-0.1.0.tgz',
+  'install.ps1',
+  'uninstall.ps1',
+  'INSTALL.cmd',
 ];
 
 test('stages exactly the verified release assets with canonical checksums', async (t) => {
@@ -51,6 +61,31 @@ test('stages exactly the verified release assets with canonical checksums', asyn
     const [hash, filename] = row.split('  ');
     assert.equal(hash, sha256(await readFile(path.join(fixture.outputDirectory, filename))));
   }
+});
+
+test('stages one fixed-name customer ZIP containing the verified release payloads and a double-click launcher', async (t) => {
+  const fixture = await createStageFixture(t);
+  await stageRelease({ tag: 'v0.1.0', packagePath: fixture.packagePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root });
+
+  const archivePath = path.join(fixture.outputDirectory, 'dsh-market-intelligence-latest.zip');
+  const listing = await execFileAsync('tar.exe', ['-tf', archivePath], { encoding: 'utf8', windowsHide: true });
+  assert.deepEqual(String(listing.stdout).trimEnd().split(/\r?\n/).sort(), [...expectedCustomerArchiveEntries].sort());
+
+  const extracted = path.join(fixture.root, 'customer-archive');
+  await mkdir(extracted);
+  await execFileAsync('tar.exe', ['-xf', archivePath, '-C', extracted], { windowsHide: true });
+  for (const name of expectedCustomerArchiveEntries.filter((entry) => entry !== 'INSTALL.cmd')) {
+    assert.deepEqual(
+      await readFile(path.join(extracted, name)),
+      await readFile(path.join(fixture.outputDirectory, name)),
+      name,
+    );
+  }
+  const launcher = await readFile(path.join(extracted, 'INSTALL.cmd'), 'utf8');
+  assert.match(launcher, /install\.ps1/);
+  assert.match(launcher, /-Version "0\.1\.0"/);
+  assert.match(launcher, /releases\/tags\/v0\.1\.0/);
+  assert.doesNotMatch(launcher, /-AcceptLicense/);
 });
 
 test('rejects tags and package metadata that cannot identify an exact stable release', async (t) => {
@@ -213,7 +248,7 @@ test('snapshots all four sources and ignores caller-provided hook objects', asyn
   }
 });
 
-test('has no post-verification hook or sixth-file commit path', async (t) => {
+test('has no post-verification hook or unverified commit path', async (t) => {
   const fixture = await createStageFixture(t);
   await stageRelease({ tag: 'v0.1.0', packagePath: fixture.packagePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root });
   assert.deepEqual((await readdir(fixture.outputDirectory)).sort(), [...expectedAssets].sort());

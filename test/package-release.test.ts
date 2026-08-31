@@ -55,31 +55,21 @@ test('license bytes are pinned to LF for the installer package hash on every che
   assert.match(attributes, /^LICENSE text eol=lf$/m);
 });
 
-test('installation documentation provides latest and pinned verified bootstraps', async () => {
+test('README provides one versionless customer download and keeps advanced commands in the install guide', async () => {
   const root = process.cwd();
   const readme = await readFile(path.join(root, 'README.md'), 'utf8');
   const installGuide = await readFile(path.join(root, 'docs', 'INSTALL.md'), 'utf8');
   const installerReadme = await readFile(path.join(root, 'installer', 'README.md'), 'utf8');
   const combined = [readme, installGuide, installerReadme].join('\n');
 
-  assert.match(readme, /https:\/\/api\.github\.com\/repos\/Yalen-xy\/dsh-market-intelligence\/releases\/latest/);
-  assert.match(readme, /https:\/\/github\.com\/Yalen-xy\/dsh-market-intelligence\/releases\/download\/\$tag/);
-  assert.match(readme, /https:\/\/github\.com\/Yalen-xy\/dsh-market-intelligence\/releases\/download\/v0\.1\.0/);
-  assert.match(readme, /https:\/\/api\.github\.com\/repos\/Yalen-xy\/dsh-market-intelligence\/releases\/tags\/v0\.1\.0/);
-  assert.match(readme, /\[Security\.Cryptography\.SHA256\]::Create\(\)/);
+  assert.match(readme, /https:\/\/github\.com\/Yalen-xy\/dsh-market-intelligence\/releases\/latest\/download\/dsh-market-intelligence-latest\.zip/);
+  assert.match(readme, /INSTALL\.cmd/);
+  assert.doesNotMatch(readme, /v\d+\.\d+\.\d+|```(?:powershell|cmd|bat)?/i);
+  assert.doesNotMatch(readme, /Invoke-WebRequest|Invoke-RestMethod|SHA256SUMS\.txt|-AcceptLicense/);
   assert.doesNotMatch(combined, /\bGet-FileHash\b/);
-  assert.match(readme, /SHA256SUMS\.txt/);
-  assert.match(readme, /\[0-9a-f\]\{64\}/);
-  assert.match(readme, /-AcceptLicense/);
   assert.doesNotMatch(combined, /\b(?:Invoke-Expression|iex)\b/i);
-
-  const hashCheck = readme.search(/ComputeHash\(\$stream\)/i);
-  const installerInvocation = readme.search(/&\s+\$installer\b/);
-  assert.ok(hashCheck >= 0 && installerInvocation > hashCheck, 'bootstrap must hash before invoking install.ps1');
-  assert.match(readme, /\[guid\]::NewGuid\(\)/i);
-  assert.match(readme, /finally\s*\{/i);
-  assert.match(readme, /Remove-Item\s+-LiteralPath\s+\$temp\s+-Recurse\s+-Force/i);
-  assert.equal([...readme.matchAll(/Invoke-WebRequest -UseBasicParsing/g)].length, 4);
+  assert.match(installGuide, /SHA256SUMS\.txt/);
+  assert.match(installGuide, /-AcceptLicense/);
 });
 
 test('installation documentation matches installer behavior and recovery boundaries', async () => {

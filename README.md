@@ -2,307 +2,56 @@
 
 [![CI](https://github.com/Yalen-xy/dsh-market-intelligence/actions/workflows/ci.yml/badge.svg)](https://github.com/Yalen-xy/dsh-market-intelligence/actions/workflows/ci.yml)
 
-`dsh-market-intelligence` 是一个在 DSH Desktop 进程内运行的本地只读市场信息插件。它采集并规范化 A 股、港股、主要 A 股指数、恒生指数（`hkHSI`）和恒生科技指数（`hkHSTECH`）的公开行情观察，并通过 7 个原生 DSH 工具提供查询。
+面向 DSH Desktop 的本地只读市场信息插件，覆盖 A 股、港股、主要 A 股指数、恒生指数和恒生科技指数。它只负责获取、整理和保存行情信息，不进行估值、选股或交易。
 
-它不是交易系统：不做估值、选股、评分或投资建议，不登录券商，不读取账户/持仓，不下单，也不提供模拟下单或自动交易。唯一会改变本地状态的模型可见操作是维护本插件自己的观察列表。插件与 `dsh-stock-watch` 没有运行时或数据依赖；安装、升级或移除本插件都不应修改它。
+## 下载最新版
 
-## 一键安装
+[**⬇ 下载 Windows 安装包（ZIP）**](https://github.com/Yalen-xy/dsh-market-intelligence/releases/latest/download/dsh-market-intelligence-latest.zip)
 
-要求 Windows PowerShell 5.1 或 PowerShell 7、Node.js `^22.19.0 || >=24.0.0`，以及可验证、支持 `plugin add/remove` 的 DSH Desktop 受管 CLI。开始前请正常退出 DSH Desktop；若检测到属于该 DSH 安装或 profile 的进程，安装器会拒绝继续，不会强制结束进程。
+1. 正常退出 DSH Desktop。
+2. 下载并解压 ZIP。
+3. 双击 `INSTALL.cmd`。
+4. 阅读许可提示并按安装窗口完成操作。
+5. 重新启动 DSH Desktop。
 
-以下命令接受本项目的[个人非商业有限使用许可](LICENSE)，把 `install.ps1` 和 `SHA256SUMS.txt` 下载到新的唯一临时目录，严格验证 manifest 恰好描述当前版本的四个 Release payload，再核对 `install.ps1` 的 SHA-256；只有全部通过后才用调用运算符 `&` 执行脚本。它不使用动态表达式执行。安装器随后还会独立校验下载的 npm tarball，因此 bootstrap 校验不会绕过 payload 校验。
+安装器会自动寻找 DSH Desktop 的受管 Profile，校验发布文件，并在修改前创建有限范围的备份。检测到相关 DSH 进程、文件校验失败或安装条件不明确时，它会停止而不是强行修改。高级安装、指定 DSH 数据目录、升级、卸载和恢复方法见[安装与恢复指南](docs/INSTALL.md)。
 
-### 最新稳定版
+## 能做什么
 
-```powershell
-& {
-  $ErrorActionPreference = 'Stop'
-  $api = 'https://api.github.com/repos/Yalen-xy/dsh-market-intelligence/releases/latest'
-  $release = Invoke-RestMethod -Uri $api
-  $tag = [string]$release.tag_name
-  if ($tag -cnotmatch '\Av(?<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\z') { throw 'Latest Release tag is not stable semantic version.' }
-  $version = [string]$Matches.version
-  $base = "https://github.com/Yalen-xy/dsh-market-intelligence/releases/download/$tag"
-  $temp = Join-Path ([IO.Path]::GetTempPath()) ('dsh-market-installer-' + [guid]::NewGuid().ToString('D'))
-  New-Item -ItemType Directory -Path $temp -ErrorAction Stop | Out-Null
-  try {
-    $installer = Join-Path $temp 'install.ps1'
-    $manifest = Join-Path $temp 'SHA256SUMS.txt'
-    Invoke-WebRequest -UseBasicParsing -Uri "$base/install.ps1" -OutFile $installer
-    Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS.txt" -OutFile $manifest
-    $expectedNames = @('install.ps1', 'uninstall.ps1', "dsh-market-intelligence-$version.tgz", 'LICENSE.txt')
-    $expectedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
-    $seenNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    $seenHashes = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    $entries = [ordered]@{}
-    foreach ($name in $expectedNames) { [void]$expectedSet.Add($name) }
-    foreach ($line in [IO.File]::ReadAllLines($manifest)) {
-      if ($line.Length -eq 0) { continue }
-      $match = [regex]::Match($line, '\A(?<hash>[0-9a-f]{64})  (?<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\z', [Text.RegularExpressions.RegexOptions]::CultureInvariant)
-      if (-not $match.Success) { throw 'Manifest contains a malformed row.' }
-      $name = $match.Groups['name'].Value
-      $hash = $match.Groups['hash'].Value
-      if (-not $seenNames.Add($name)) { throw 'Manifest contains a duplicate file name.' }
-      if (-not $expectedSet.Contains($name)) { throw 'Manifest contains an unexpected file name.' }
-      if (-not $seenHashes.Add($hash)) { throw 'Manifest contains a duplicate hash.' }
-      $entries[$name] = $hash
-    }
-    if ($entries.Count -ne $expectedNames.Count) { throw 'Manifest does not contain the exact Release payload set.' }
-    foreach ($name in $expectedNames) { if (-not $entries.Contains($name)) { throw 'Manifest is missing a Release payload.' } }
-    $stream = [IO.File]::OpenRead($installer)
-    try {
-      $sha256 = [Security.Cryptography.SHA256]::Create()
-      try { $actual = ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
-      finally { $sha256.Dispose() }
-    }
-    finally { $stream.Dispose() }
-    if (-not [string]::Equals($actual, [string]$entries['install.ps1'], [StringComparison]::Ordinal)) { throw 'install.ps1 SHA-256 mismatch.' }
-    & $installer -Version $version -ReleaseApiUri $api -AcceptLicense
-    if (-not $?) { throw 'Installer failed.' }
-  }
-  finally {
-    if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
-  }
-}
-```
+- 查询 A 股、港股及主要指数的市场阶段、集合竞价和开市前状态。
+- 获取行情快照、分钟线以及日、周、月序列。
+- 获取新浪行业和概念板块观察，并在腾讯 A 股行情失败时使用新浪后备。
+- 维护最多 100 只证券的本地观察列表，在开盘期间进行有界轮询。
+- 使用 SQLite 保存观察数据，提供压缩、容量限制、缺口记录和恢复游标。
+- 通过 `market_data_health` 明确报告延迟、陈旧、缺失和解析异常，不用虚构数据填补空白。
 
-### 固定版本 v0.1.0
+插件提供七个 DSH 工具：`market_auction`、`market_data_health`、`market_quotes`、`market_sectors`、`market_series`、`market_status` 和 `market_watchlist`。参数与返回字段见[工具参考](docs/TOOLS.md)。
 
-固定版本同时固定 Release 下载 URL 和 API URL，避免以后最新版本变化时 tarball 与版本参数错配。
+## 工作原理
 
-```powershell
-& {
-  $ErrorActionPreference = 'Stop'
-  $tag = 'v0.1.0'
-  $version = '0.1.0'
-  $api = 'https://api.github.com/repos/Yalen-xy/dsh-market-intelligence/releases/tags/v0.1.0'
-  $base = 'https://github.com/Yalen-xy/dsh-market-intelligence/releases/download/v0.1.0'
-  $temp = Join-Path ([IO.Path]::GetTempPath()) ('dsh-market-installer-' + [guid]::NewGuid().ToString('D'))
-  New-Item -ItemType Directory -Path $temp -ErrorAction Stop | Out-Null
-  try {
-    $installer = Join-Path $temp 'install.ps1'
-    $manifest = Join-Path $temp 'SHA256SUMS.txt'
-    Invoke-WebRequest -UseBasicParsing -Uri "$base/install.ps1" -OutFile $installer
-    Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS.txt" -OutFile $manifest
-    $expectedNames = @('install.ps1', 'uninstall.ps1', "dsh-market-intelligence-$version.tgz", 'LICENSE.txt')
-    $expectedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
-    $seenNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    $seenHashes = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    $entries = [ordered]@{}
-    foreach ($name in $expectedNames) { [void]$expectedSet.Add($name) }
-    foreach ($line in [IO.File]::ReadAllLines($manifest)) {
-      if ($line.Length -eq 0) { continue }
-      $match = [regex]::Match($line, '\A(?<hash>[0-9a-f]{64})  (?<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\z', [Text.RegularExpressions.RegexOptions]::CultureInvariant)
-      if (-not $match.Success) { throw 'Manifest contains a malformed row.' }
-      $name = $match.Groups['name'].Value
-      $hash = $match.Groups['hash'].Value
-      if (-not $seenNames.Add($name)) { throw 'Manifest contains a duplicate file name.' }
-      if (-not $expectedSet.Contains($name)) { throw 'Manifest contains an unexpected file name.' }
-      if (-not $seenHashes.Add($hash)) { throw 'Manifest contains a duplicate hash.' }
-      $entries[$name] = $hash
-    }
-    if ($entries.Count -ne $expectedNames.Count) { throw 'Manifest does not contain the exact Release payload set.' }
-    foreach ($name in $expectedNames) { if (-not $entries.Contains($name)) { throw 'Manifest is missing a Release payload.' } }
-    $stream = [IO.File]::OpenRead($installer)
-    try {
-      $sha256 = [Security.Cryptography.SHA256]::Create()
-      try { $actual = ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
-      finally { $sha256.Dispose() }
-    }
-    finally { $stream.Dispose() }
-    if (-not [string]::Equals($actual, [string]$entries['install.ps1'], [StringComparison]::Ordinal)) { throw 'install.ps1 SHA-256 mismatch.' }
-    & $installer -Version $version -ReleaseApiUri $api -AcceptLicense
-    if (-not $?) { throw 'Installer failed.' }
-  }
-  finally {
-    if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
-  }
-}
-```
+插件在 DSH Desktop 进程内运行。调度器根据中国内地和香港市场阶段控制采集频率；数据源适配器从固定、经过审查的腾讯和新浪公开端点读取信息；规范化层统一证券代码、时间和缺失值；SQLite 存储层保存行情与健康记录；七个工具只把经过状态和时效检查的数据交给 DSH。
 
-若自动发现不到唯一 DSH home，请下载并验证脚本后在最后一行加入类似 `-DshHome 'E:\Applications\dsh-data'`；若受管 CLI 不在可信的自动发现位置，再显式提供 `-DshCommand`。完整的参数、手动下载、升级、降级、卸载、回滚与重启验证见[安装与恢复指南](docs/INSTALL.md)。
+完整的数据流、模块职责、存储限制和故障恢复设计见[架构说明](docs/ARCHITECTURE.md)。
 
-## 功能概览
+## 明确边界
 
-- A 股和港股交易阶段、集合竞价/开市前时段与交易日历状态。
-- A/H 股票及五个固定指数的行情快照、分钟线和日/周/月序列。
-- 新浪行业和概念板块观察，以及腾讯失败时的 A 股行情后备。
-- 最多 100 只证券的本地观察列表与开盘期间有界轮询。
-- SQLite 本地持久化、分钟/日线压缩、容量限制、停机缺口和恢复游标。
-- 七个闭合 JSON Schema 的 DSH 原生工具，以及完整的数据健康诊断。
-- 严格只读外部边界：不接触券商、账户、持仓或交易。
+本插件不登录券商，不读取账户、持仓或交易信息，不下单，也不提供模拟交易。唯一会改变本地状态的模型可见操作是维护本插件自己的观察列表。它与 `dsh-stock-watch` 没有运行时或数据依赖。
 
-## 仓库导航
+## 要求与许可
 
-| 入口 | 内容 |
-| --- | --- |
-| [工具参考](docs/TOOLS.md) | 七个工具的用途、参数、示例和符号格式 |
-| [架构说明](docs/ARCHITECTURE.md) | 数据流、模块职责、存储、安全和恢复设计 |
-| [安装指南](docs/INSTALL.md) | 校验安装、升级、降级、卸载、回滚与验证 |
-| [安全策略](SECURITY.md) | 安全边界和漏洞报告方式 |
-| [变更日志](CHANGELOG.md) | 版本功能和重要变更 |
-| `src/` | TypeScript 源码 |
-| `lib/` | 随 npm 包发布的编译结果 |
-| `test/` | 单元、集成、负载和生命周期测试 |
-| `scripts/` | profile smoke 与显式 opt-in 的真实端点 smoke |
+- Windows 版 DSH Desktop，以及可用的受管 Desktop Profile。
+- Windows PowerShell 5.1 或 PowerShell 7。
+- Node.js `^22.19.0 || >=24.0.0`。
+- 仅限个人、非商业、只读研究使用，具体见[许可证](LICENSE)。
 
-## 数据源、时效与许可限制
+Use is limited to personal, non-commercial, read-only research. Tencent and Sina are not partners of, and have not authorized, this project. Their unofficial interfaces may change, fail, or become unavailable without notice. You are responsible for compliance with applicable law and upstream terms. Nothing in this project or License grants third-party authorization or guarantees legal compliance.
 
-> Use is limited to personal, non-commercial, read-only research. Tencent and Sina are not partners of, and have not authorized, this project. Their unofficial interfaces may change, fail, or become unavailable without notice. You are responsible for compliance with applicable law and upstream terms. Nothing in this project or License grants third-party authorization or guarantees legal compliance.
+本项目不是投资建议，不保证数据完整、准确、实时或适合交易。
 
-- 腾讯财经是行情快照、指数、分钟线和前复权 K 线的首选来源；请求限于 `web.ifzq.gtimg.cn` 与 `smartbox.gtimg.cn` 的已审查固定路径。
-- 新浪财经仅作为 A 股快照后备，并提供行业和概念板块数据；请求限于 `hq.sinajs.cn`、`money.finance.sina.com.cn` 与 `vip.stock.finance.sina.com.cn` 的已审查固定路径。
-- 工具结果中的 `source` 表示实际来源，`marketTime` 是市场数据所代表的时间，`fetchedAt` 是本机获取时间；`isDelayed` 和 `isStale` 分别表示已知/检测到的延迟与陈旧状态。缺失字段为 `null`，不会伪装成 0。
-- 这些是可能变更、限流、延迟、停用或改变格式的公开端点。插件不承诺免费、实时、连续可用或任何固定延迟，也不保证数据完整、准确或适合交易。
-- 软件许可只允许未修改的官方 Release 用于个人、非商业、只读研究；它不是投资建议。本项目没有获得腾讯或新浪授权，也不授予任何第三方数据权利。使用者必须自行确认其地区、用途和数据源条款允许使用。
+## 更多资料
 
-## 市场阶段与采集节奏
-
-所有阶段使用 `Asia/Shanghai`。区间起点包含、终点不包含；到达收盘边界后停止高频采集并运行维护。
-
-| 市场 | 阶段 | 时间 | 行情采集 |
-| --- | --- | --- | --- |
-| A 股 | 集合竞价 | 09:15–09:30 | 活跃，默认每 10 秒 |
-| A 股 | 连续交易（上午） | 09:30–11:30 | 活跃，默认每 10 秒 |
-| A 股 | 午休 | 11:30–13:00 | 停止 |
-| A 股 | 连续交易（下午） | 13:00–15:00 | 活跃，默认每 10 秒 |
-| 港股 | 开市前时段 | 09:00–09:30 | 活跃，默认每 10 秒 |
-| 港股 | 连续交易（上午） | 09:30–12:00 | 活跃，默认每 10 秒 |
-| 港股 | 午休 | 12:00–13:00 | 停止 |
-| 港股 | 连续交易（下午） | 13:00–16:00 | 活跃，默认每 10 秒 |
-
-行业/概念板块仅在 A 股集合竞价和连续交易阶段默认每 60 秒抓取一次，每个五分钟桶最多持久化一次。上游市场时间不前进时不会重复写入，而会进入 10、30、60、300 秒的渐进退避。HSI/HSTECH 随港股阶段采集；上证、深证和沪深 300 指数随 A 股阶段采集。`providerConcurrency` 是一个由 Tencent 与 Sina 共用、跨工具调用与 provider 方法的物理 HTTP 请求上限，不是单次批处理的局部上限。
-
-年度休市日来自本地 `config.json`。年份键必须是四位 `YYYY`；每个 CN/HK 日期必须是属于该年份的真实、规范 `YYYY-MM-DD`，同一市场内不得重复。显式年份允许两个列表都为空，此时 `calendarConfidence` 为 `configured`；某一年完全没有显式日历时，插件只使用工作日回退规则并标为 `degraded`，这不代表法定交易日已得到确认。非法配置会在 provider、数据库和调度器启动前失败。
-
-## 七个 DSH 工具
-
-| 工具 | 用途 | 主要参数 |
-| --- | --- | --- |
-| `market_status` | 查询 A 股/港股阶段、收集状态和日历置信度 | 可选 `market: "CN" | "HK"` |
-| `market_quotes` | 查询显式证券、观察列表或固定指数的规范化快照 | 可选 `symbols`（最多 100）、`refresh` |
-| `market_series` | 查询一个证券的分钟/日/周/月序列 | `symbol`、`interval`；可选时间范围、`qfq`、`limit` |
-| `market_sectors` | 查询新浪行业或概念板块排名 | 可选 `category`、排序、方向、`limit` |
-| `market_auction` | 查询 A 股集合竞价或港股开市前观察 | `market`；可选同市场 `symbols` |
-| `market_watchlist` | 获取、添加或移除本地 A/H 观察证券 | `action: get/add/remove`；变更时提供 `symbol` |
-| `market_data_health` | 查询数据源、调度器、数据库、缺口与保留状态 | 无参数 |
-
-代表性工具参数都是 JSON 对象：
-
-```json
-{
-  "market_status": { "market": "CN" },
-  "market_quotes": { "symbols": ["sh000001", "hkHSI", "hkHSTECH"], "refresh": false },
-  "market_series": { "symbol": "sh600000", "interval": "day", "adjustment": "qfq", "limit": 120 },
-  "market_sectors": { "category": "industry", "sort": "changePercent", "direction": "desc", "limit": 20 },
-  "market_auction": { "market": "HK", "symbols": ["hk00700"] },
-  "market_watchlist": { "action": "add", "symbol": "700.HK" },
-  "market_data_health": {}
-}
-```
-
-非竞价阶段调用 `market_auction` 会返回成功的领域结果（空 `items` 和原因），不是工具故障。所有成功结果必须是无损 JSON：没有 `undefined`、非有限数、`BigInt`、类实例或循环结构。
-
-## 观察列表、存储与保留
-
-观察列表在 A 股和港股之间合计最多 100 只证券；工具会规范化代码并确定性拒绝重复项。固定指数由插件额外采集，不占用户观察列表条目。
-
-未显式配置 `storageDir` 时，插件使用 `%DSH_HOME%\storages\dsh-market-intelligence`。`DSH_HOME` 和显式 `storageDir` 可以位于任意本地固定磁盘，但必须是规范化的 Windows 绝对路径；网络、UNC、设备、可移动磁盘、路径穿越和未解决的 reparse-point 路径会被拒绝。显式存储目录必须以 `dsh-market-intelligence` 作为最终目录名。该目录保存：
-
-- `config.json`：观察列表和按年度划分的 CN/HK 休市日；原子替换写入。
-- `market.sqlite`（以及 SQLite 可能创建的 `-wal`/`-shm`）：行情、板块、健康和维护记录。
-
-原始 10 秒观察只保留当前市场日。收盘维护生成一分钟和日线后，在同一事务删除已成功压缩的收盘日原始记录；一分钟数据默认保留 30 个显式存储的交易日，日线和日摘要长期保留。板块盘中数据为五分钟分辨率。维护后的软上限默认 512 MiB，优先清理最旧的证券分钟数据，再清理最旧的板块盘中数据；`config.json`、日线、日摘要和解释当前状态所需的健康记录受保护。软上限不是瞬时文件大小保证，SQLite/WAL 在维护或检查点前可能暂时更大。
-
-DSH 停机期间不采集。插件启动时若存在上次持久化的 Tencent 尝试时间，会在 scheduler 启动前用同一旧锚点为 CN/HK 原子初始化内部 `recovery_progress` 游标（已有游标不覆盖）；此后 provider health 只用于诊断，不再充当恢复 checkpoint。每个已处理会话片段都把历史观察、该片段的 gap（如有）和推进后的游标写入同一 SQLite 事务。进程中途退出后以对应市场的 durable cursor 续跑，不会因另一个市场或即时请求更新 health 而越过尚未提交的片段；同一或更早片段的重放为 no-op，因此不同 `fetchedAt` 不会制造重复观察。恢复只处理真实交易日的有效竞价/连续交易会话，跳过午休、收盘、周末和显式休市日，最多回看 31 个日历日且最多处理 128 个会话片段。provider 只有在显式声明相应历史能力时才会收到有界回补请求；当前内置 Tencent/Sina provider 都明确声明不提供停机快照历史，因此插件不会把即时请求或序列端点冒充历史，而会为每个无法回补的会话片段幂等记录 market-wide `quote` gap，原因为 `provider_history_unavailable`。首次安装没有历史锚点时不会虚构先前缺口。
-
-## 配置字段与边界
-
-未知字段会被拒绝；没有 URL、请求头、Cookie、凭证或交易相关配置。
-
-| 字段 | 默认值 | 有效范围/约束 |
-| --- | ---: | --- |
-| `storageDir` | `%DSH_HOME%\storages\dsh-market-intelligence` | 任意本地固定磁盘上的规范化绝对路径，最终目录必须为 `dsh-market-intelligence` |
-| `requestTimeoutMs` | `10000` | 整数 `100–120000` |
-| `providerBatchSize` | `100` | 整数 `1–100` |
-| `providerConcurrency` | `4` | 整数 `1–16`；跨并行工具调用、Tencent/Sina 与其所有物理 HTTP 请求共享 |
-| `quoteIntervalMs` | `10000` | 整数 `1000–300000` |
-| `sectorIntervalMs` | `60000` | 整数 `10000–900000` |
-| `sectorPersistIntervalMs` | `300000` | `60000–3600000`，必须是整分钟倍数 |
-| `minuteRetentionTradingDays` | `30` | 整数 `1–3650` |
-| `storageSoftLimitBytes` | `536870912` | 整数 `1–536870912`（512 MiB） |
-| `watchlistLimit` | `100` | 固定为 `100` |
-
-`config.json` 的状态形状如下；优先用 `market_watchlist` 修改观察列表，手工维护休市日时应先停止 DSH 并保留备份：
-
-```json
-{
-  "watchlist": ["sh600000", "hk00700"],
-  "closures": {
-    "2026": {
-      "CN": ["2026-10-01"],
-      "HK": ["2026-10-01"]
-    }
-  }
-}
-```
-
-`closures` 只允许四位年份键，每个年份对象必须恰好包含 `CN` 和 `HK`；日期必须是规范真实日期、必须属于外层年份、同一市场内不得重复。CN 与 HK 可以在同一天同时休市，显式空数组年份也是有效配置。
-
-## 验证、升级与移除
-
-要求 Node.js `^22.19.0 || >=24.0.0`，并需要运行时 `node:sqlite`。源码贡献者可在任意 checkout 根目录运行以下 keyless 验证；这些命令不会访问腾讯或新浪：
-
-```powershell
-npm ci
-npm test
-npm run build
-npm run test:load
-npm run test:load-profile
-npm pack --dry-run --ignore-scripts
-```
-
-终端用户应使用上面的已校验 Release 安装器，不要手工编辑 profile 的 `package.json`、lockfile 或 bundle 列表。对更高版本重复运行 bootstrap 即升级；降级必须显式传入 `-AllowDowngrade`。卸载使用同一 Release 中、已经 manifest 校验过的 `uninstall.ps1`。卸载只移除 package 和 bundle 注册，保留 `%DSH_HOME%\storages\dsh-market-intelligence` 或用户已有的显式存储根；数据清理是另外的手动决定。详见[安装与恢复指南](docs/INSTALL.md)。
-
-## Smoke 检查
-
-`test:load` 用假时钟和脚本化数据源模拟全部 100 只 A/H 观察列表证券以及 5 个内置指数的完整交易日，并逐证券验证原始观察压缩为分钟/日线；`test:load-profile` 使用构建后的 `lib`、真实 Cordis Context 和 ToolRuntime、临时 `DSH_HOME`，不接触用户存储，也不联网：
-
-```powershell
-npm run build
-npm run test:load
-npm run test:load-profile
-```
-
-真实端点 smoke 是显式 opt-in，会访问外部公开端点，结果受交易时间、网络、限流和上游格式影响。它不写 profile/数据库，只输出 provider、capability、结果状态（`ok`、`network`、`http`、`content-type`、`parse` 或 `empty`）、字节数和市场时间；每项能力都会校验相应的 Content-Type，搜索结果没有市场时间仍可为 `ok`。它不输出响应正文、错误详情、响应头、Cookie 或凭证：
-
-```powershell
-$env:DSH_MARKET_LIVE_SMOKE = '1'
-npm run smoke:live
-Remove-Item Env:DSH_MARKET_LIVE_SMOKE
-```
-
-不要把 `smoke:live` 放进 keyless 测试或 CI 必过条件。任一能力不是 `ok` 都会以非零状态退出；一次失败不等于市场关闭，也不能证明端点永久不可用，应结合该行的脱敏结果状态和 `market_data_health` 判断。
-
-## 健康状态解释
-
-- `providers[].available` 表示最近一次完整尝试是否成功；同时查看 `lastAttemptAt`、`lastSuccessAt`、`lastFailureAt` 和 `consecutiveFailures`。
-- `errorCategory` 只给出脱敏类别：`timeout`、`abort`、`http`、`decode`、`parse`、`storage`、`network`、`validation`、`partial` 或 `unknown`。`partial` 表示部分结果可用，不应当作完整成功。
-- `scheduler.state/pendingTimers/inFlight` 用于判断收集是否运行和是否仍有工作。停止 DSH 会停止插件、计时器和请求；本插件不会创建 Windows 服务或计划任务。
-- `database.counts` 和字节数用于观察保留与容量；`retention.status=over-cap` 表示受保护数据或 SQLite 页布局使软上限暂时无法满足，`unknown` 表示还没有可解释的当前维护结果。
-- `gaps` 同时记录本地原始观察压缩失败与无法由 provider 历史能力回补的停机会话区间；它们不应被解读为零成交。`reason=provider_history_unavailable` 表示当前 provider 没有明确历史能力，插件没有合成观察。
-- `market_status.calendarConfidence=degraded` 表示该年份没有显式休市表，需要先补充日历再依赖阶段判断。
-
-## 隐私与安全边界
-
-插件只发 GET 请求，拒绝重定向，并对超时、响应体大小、批次和并发设限。它不接受任意 URL，不执行下载代码，不提交表单，不请求或存储财经网站登录 Cookie、券商凭证、账户标识、持仓或订单。日志和健康信息只保留数据源、能力、时间、状态与脱敏错误；不会保存响应正文，且应避免把完整观察列表写入日志。
-
-## 恢复与回滚
-
-1. 先正常退出 DSH Desktop，确认收集已经停止；复制 `config.json`、`market.sqlite`、`market.sqlite-wal` 和 `market.sqlite-shm`（若存在）作为备份。
-2. 上游故障时先查看 `market_data_health`；不要把任意替代 URL 写入配置。等待恢复或发布经过审查的 provider 更新。
-3. 数据库损坏时保留 `config.json`，把 SQLite 文件组移动到带时间戳的隔离目录后再启动 DSH，让插件重建数据库。新数据库没有旧 provider 健康锚点，因此不会猜测数据库丢失前的区间；插件绝不伪造行情。正常保留数据库的重启会按上述有界规则回补 provider 明确支持的历史能力，或记录 `provider_history_unavailable` gap。
-4. 版本回退时使用先前已审查的固定 GitHub Release、匹配的 tag API 和 `-AllowDowngrade`；不要只复制旧 `lib` 覆盖已安装 package。
-5. 若插件无法加载且需要快速隔离，使用同一 Release 中经过 manifest 校验的 `uninstall.ps1`；运行数据保持不动，确认恢复方案后再决定是否清理。
-
-DSH Desktop 停止即停止采集，这是设计边界，不是故障。如果需要常驻服务、更多市场/数据源、模型可见的新字段或任何交易能力，必须另行设计与安全审查。
+- [安装、升级、卸载与恢复](docs/INSTALL.md)
+- [七个工具的参数和返回值](docs/TOOLS.md)
+- [架构和数据流](docs/ARCHITECTURE.md)
+- [安全边界和漏洞报告](SECURITY.md)
+- [变更记录](CHANGELOG.md)
