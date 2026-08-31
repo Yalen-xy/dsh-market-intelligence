@@ -23,7 +23,7 @@ export function createClaudeManifest(version: string): McpbManifest {
       url: `${REPOSITORY_URL}.git`,
     },
     homepage: REPOSITORY_URL,
-    documentation: `${REPOSITORY_URL}/blob/main/docs/INSTALL.md`,
+    documentation: `${REPOSITORY_URL}/blob/main/docs/CLAUDE.md`,
     support: `${REPOSITORY_URL}/issues`,
     license: 'Personal Non-Commercial Limited Use License; see LICENSE',
     privacy_policies: [
@@ -32,7 +32,7 @@ export function createClaudeManifest(version: string): McpbManifest {
     ],
     compatibility: {
       platforms: ['win32'],
-      runtimes: { node: '>=22.19.0' },
+      runtimes: { node: '^22.19.0 || >=24.0.0' },
     },
     server: {
       type: 'node',

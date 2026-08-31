@@ -1,6 +1,6 @@
 # Claude Desktop extension
 
-`claude-market-intelligence-latest.mcpb` 是面向 Claude Desktop 的 Windows 扩展。它提供与 DSH 相同的七个只读行情工具，不要求安装或运行 DeepSeek Harness。安装包不需要手动执行 npm 命令或编写 JSON 配置。
+`claude-market-intelligence-latest.mcpb` 是面向 Claude Desktop 的 Windows 扩展。它提供与 DSH 相同的七个只读行情工具，不要求安装或运行 DeepSeek Harness。安装包不需要手动执行 npm 命令或编写 JSON 配置。Claude Desktop supplies the extension runtime; normal installation needs no dependency management.
 
 ## 安装
 
@@ -9,7 +9,7 @@
 3. 选择下载的 `.mcpb` 文件并完成安装；返回扩展列表确认它已启用。
 4. 在对话中调用 `market_status` 或 `market_data_health`，确认本机市场数据状态。
 
-扩展仅支持 Windows，并要求可用的 Node.js `^22.19.0 || >=24.0.0` 运行时。它不安装 DSH、不修改 DSH 配置，也不需要把 DSH 保持运行。
+扩展仅支持 Windows。它不安装 DSH、不修改 DSH 配置，也不需要把 DSH 保持运行。
 
 ## 存储与配置
 
@@ -35,7 +35,7 @@ Claude 与 DSH 使用同一份工具契约，工具名和业务行为一致：
 
 在 Claude Desktop 的 Extensions 列表中选择本扩展并执行 Uninstall。卸载不会修改 DSH；如需清除 Claude 的本地市场数据，请仅在确认不再需要其历史、观察列表和诊断记录后，按 Claude 显示的扩展数据管理选项操作。
 
-如果 Claude 未列出工具，请确认系统为 Windows、扩展处于启用状态且 Node.js 运行时可用。若工具可见但没有数据，先运行 `market_data_health`：它会区分提供方不可用、缓存陈旧、请求超时和存储故障。请不要在问题报告中附上本机路径、数据库、日志、凭据或原始上游响应。
+如果 Claude 未列出工具，请确认系统为 Windows 且扩展处于启用状态。若工具可见但没有数据，先运行 `market_data_health`：它会区分提供方不可用、缓存陈旧、请求超时和存储故障。请不要在问题报告中附上本机路径、数据库、日志、凭据或原始上游响应。
 
 ## 边界、隐私与法律说明
 

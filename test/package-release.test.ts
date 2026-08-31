@@ -77,12 +77,17 @@ test('Claude documentation describes the Windows extension boundary without publ
   const root = process.cwd();
   const claudeGuide = await readFile(path.join(root, 'docs', 'CLAUDE.md'), 'utf8');
   const architecture = await readFile(path.join(root, 'docs', 'ARCHITECTURE.md'), 'utf8');
+  const releaseWorkflow = await readFile(path.join(root, '.github', 'workflows', 'release.yml'), 'utf8');
 
   assert.match(claudeGuide, /Settings\s*→\s*Extensions\s*→\s*Advanced settings\s*→\s*Install Extension/);
   assert.match(claudeGuide, /claude-market-intelligence-latest\.mcpb/);
   assert.match(claudeGuide, /Windows/i);
   assert.match(claudeGuide, /(?:无需|不需要)手动(?:执行)?\s*npm|no manual npm/i);
   assert.match(claudeGuide, /(?:无需|不需要)手动.*JSON|no manual JSON/i);
+  assert.match(claudeGuide, /Claude Desktop supplies the extension runtime; normal installation needs no dependency management/i);
+  assert.doesNotMatch(claudeGuide, /Node\.js|system Node|安装.*Node/i);
+  assert.match(releaseWorkflow, /Claude Desktop supplies the extension runtime; normal Claude installation needs no dependency management/i);
+  assert.doesNotMatch(releaseWorkflow, /Claude Desktop[^\r\n]*Node\.js/i);
   assert.match(claudeGuide, /D:\\[^\r\n`]+/);
   assert.match(claudeGuide, /Claude.*DSH|DSH.*Claude/i);
   assert.match(claudeGuide, /(?:独立|independent)[^\n]*(?:数据库|database)|(?:数据库|database)[^\n]*(?:独立|independent)/i);
@@ -98,6 +103,9 @@ test('Claude documentation describes the Windows extension boundary without publ
   assert.match(claudeGuide, /https:\/\/www\.tencent\.com\/privacy-policy\//);
   assert.match(claudeGuide, /https:\/\/corp\.sina\.com\.cn\/eng\/sina_priv_eng\.htm/);
   assert.match(architecture, /shared|共享/i);
+  assert.match(architecture, /`src\/runtime\.ts`.*`src\/tool-contracts\.ts`/i);
+  assert.match(architecture, /`src\/index\.ts` and `src\/tools\.ts` are explicitly DSH adapters/i);
+  assert.doesNotMatch(architecture, /`src\/`[^\n]*without host SDK imports/i);
   assert.match(architecture, /Codex[\s\S]{0,120}(?:planned|计划|reserved|预留)/i);
   assert.match(architecture, /no Codex adapter is currently available/i);
 

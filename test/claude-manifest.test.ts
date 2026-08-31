@@ -18,8 +18,9 @@ test('Claude MCPB manifest declares the fixed Windows market extension', () => {
   assert.equal(manifest.manifest_version, '0.4');
   assert.equal(manifest.name, 'dsh-market-intelligence');
   assert.equal(manifest.version, '0.2.0');
+  assert.equal(manifest.documentation, 'https://github.com/Yalen-xy/dsh-market-intelligence/blob/main/docs/CLAUDE.md');
   assert.deepEqual(manifest.compatibility?.platforms, ['win32']);
-  assert.equal(manifest.compatibility?.runtimes?.node, '>=22.19.0');
+  assert.equal(manifest.compatibility?.runtimes?.node, '^22.19.0 || >=24.0.0');
   assert.equal(manifest.server.type, 'node');
   assert.equal(manifest.server.entry_point, 'server/index.js');
   assert.deepEqual(manifest.privacy_policies, [

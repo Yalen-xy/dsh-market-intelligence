@@ -74,7 +74,7 @@ jobs:
 
           ## Requirements
 
-          Windows with either DeepSeek Harness configured through a valid managed desktop profile or Claude Desktop, plus Node.js ^22.19.0 or >=24.0.0. The DSH installer requires Windows PowerShell 5.1 or PowerShell 7.
+          Windows with either DeepSeek Harness configured through a valid managed desktop profile, which requires Node.js ^22.19.0 or >=24.0.0, or Claude Desktop. Claude Desktop supplies the extension runtime; normal Claude installation needs no dependency management. The DSH installer requires Windows PowerShell 5.1 or PowerShell 7.
 
           ## Material changes
 

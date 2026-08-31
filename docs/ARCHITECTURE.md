@@ -6,6 +6,8 @@ DSH Market Intelligence is a local, read-only market-data product with a shared 
 
 One repository, semantic version, tag-based GitHub Release, license, changelog, and CI serve every adapter. Each Release provides the latest DSH ZIP and Claude MCPB assets; historical tags remain available for audit and rollback. The platform-neutral shared core owns providers, HTTP policy, calendar, scheduler, models, symbol normalization, SQLite semantics, retention, service behavior, and canonical tools. Adapters only translate that contract into their host registry and lifecycle.
 
+The SDK-free shared modules include `src/runtime.ts`, `src/tool-contracts.ts`, and the market/data core they compose. `src/index.ts` and `src/tools.ts` are explicitly DSH adapters: they import Cordis, DSH tools, and SchemActery to connect the shared contract to DeepSeek Harness.
+
 The DSH and Claude adapters never share a live SQLite database, watchlist, configuration, logs, or scheduler. A future Codex adapter is planned and reserved at this boundary; no Codex adapter is currently available.
 
 ## Data flow
@@ -31,8 +33,8 @@ Sina Finance ────┘                                      │
 
 | Component | Location | Responsibility |
 | --- | --- | --- |
-| Shared core | `src/` | Holds host-neutral provider, storage, schedule, service, model, and tool behavior without host SDK imports. |
-| DSH adapter | `src/index.ts`, `src/tools.ts` | Maps the canonical tools and lifecycle to DeepSeek Harness and SchemActery. |
+| Shared core | `src/runtime.ts`, `src/tool-contracts.ts`, and market/data modules | Holds host-neutral provider, storage, schedule, service, model, and canonical tool behavior without host SDK imports. |
+| DSH adapter | `src/index.ts`, `src/tools.ts` | Imports Cordis, DSH tools, and SchemActery to map the canonical tools and lifecycle to DeepSeek Harness. |
 | Claude adapter | `claude/` | Maps the canonical tools and lifecycle to Windows MCP stdio and MCPB metadata. |
 | Cordis lifecycle | `src/index.ts` | Validates configuration, creates dependencies, registers the plugin, and disposes resources in order. |
 | Tool boundary | `src/tools.ts` | Defines seven closed JSON input/output schemas and rejects lossy or invalid results. |

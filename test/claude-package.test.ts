@@ -23,11 +23,17 @@ test('Claude MCPB builder produces an officially valid self-contained Windows pa
   await mkdir(manifestDirectory);
   await writeFile(path.join(manifestDirectory, 'manifest.json'), archive['manifest.json']!);
   const server = Buffer.from(archive['server/index.js']!).toString('utf8');
+  const manifest = JSON.parse(Buffer.from(archive['manifest.json']!).toString('utf8')) as {
+    documentation?: string;
+    compatibility?: { runtimes?: { node?: string } };
+  };
 
   assert.equal(result.output, output);
   assert.match(result.sha256, /^[a-f0-9]{64}$/);
   assert.deepEqual(names, expectedFiles);
   assert.equal(validateManifest(manifestDirectory), true);
+  assert.equal(manifest.documentation, 'https://github.com/Yalen-xy/dsh-market-intelligence/blob/main/docs/CLAUDE.md');
+  assert.equal(manifest.compatibility?.runtimes?.node, '^22.19.0 || >=24.0.0');
   assert.doesNotMatch(server, /sourceMappingURL|\.ts(?:["'`]|$)|test\/fixtures|\.log(?:["'`]|$)/i);
   assert.doesNotMatch(server, /@deepseek-ai|cordis|schemastery|cordis\.patch|dsh\.patch/i);
   assert.doesNotMatch(server, /D:\\AI|[A-Z]:\\Users\\|dsh-market-intelligence\\.worktrees/i);
