@@ -14,6 +14,7 @@ type SinaMarketProvider = Pick<MarketProvider, 'quotes'> & {
 
 type DisposableLimiter = RequestLimiter & { dispose(): Promise<void> };
 type DisposableService = MarketToolsService & { dispose(): Promise<void> };
+type CleanupOutcome = { failed: false } | { failed: true; error: unknown };
 
 export type MarketRuntime = {
   service: MarketToolsService;
@@ -52,10 +53,13 @@ export async function startMarketRuntime(
     if (disposal) return disposal;
     disposal = (async () => {
       const errors: unknown[] = [];
-      let limiterDrain: Promise<void> | undefined;
+      let limiterDrain: Promise<CleanupOutcome> | undefined;
       if (requestLimiter) {
         try {
-          limiterDrain = requestLimiter.dispose();
+          limiterDrain = requestLimiter.dispose().then<CleanupOutcome, CleanupOutcome>(
+            () => ({ failed: false }),
+            (error) => ({ failed: true, error }),
+          );
         } catch (error) {
           errors.push(error);
         }
@@ -74,11 +78,8 @@ export async function startMarketRuntime(
         }
       }
       if (limiterDrain) {
-        try {
-          await limiterDrain;
-        } catch (error) {
-          errors.push(error);
-        }
+        const outcome = await limiterDrain;
+        if (outcome.failed) errors.push(outcome.error);
       }
       throwCleanupErrors(errors);
     })();

@@ -120,6 +120,44 @@ test('aggregates service and limiter disposal rejections after attempting both c
   assert.deepEqual(events.slice(-2), ['drain-limiter', 'dispose-service']);
 });
 
+test('observes an immediately rejecting limiter while deferred service cleanup is pending', async () => {
+  const events: string[] = [];
+  let releaseService: (() => void) | undefined;
+  try {
+    const options = fixtureOptions(events);
+    options.createRequestLimiter = () => ({
+      run: async () => undefined,
+      dispose: () => {
+        events.push('reject-limiter');
+        return Promise.reject(new Error('limiter cleanup failed'));
+      },
+    }) as never;
+    options.createService = () => ({
+      async dispose() {
+        events.push('dispose-service-start');
+        await new Promise<void>((resolve) => { releaseService = resolve; });
+        events.push('dispose-service-end');
+        throw new Error('service cleanup failed');
+      },
+    }) as never;
+    const runtime = await startMarketRuntime(config, options);
+    const disposal = runtime.dispose();
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    releaseService?.();
+    await assert.rejects(disposal, (error: unknown) => {
+      assert.equal(error instanceof AggregateError, true);
+      assert.deepEqual((error as AggregateError).errors.map((item) => (item as Error).message), [
+        'service cleanup failed',
+        'limiter cleanup failed',
+      ]);
+      return true;
+    });
+  } finally {
+    releaseService?.();
+  }
+});
+
 test('combines startup and rollback failures without losing the startup error', async () => {
   const events: string[] = [];
   const options = fixtureOptions(events, 'createService');

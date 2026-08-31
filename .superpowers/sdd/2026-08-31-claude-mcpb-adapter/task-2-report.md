@@ -139,3 +139,59 @@ Result: exit 0 with scoped host permission for the Windows CIM fixed-drive check
 ### Controller ruling
 
 Although the original task brief showed a narrow source/test `git add` list, `package.json` builds and ships tracked `lib/` output. The complete verified generated output is therefore included in this fix-round commit: `lib/index.{js,d.ts}`, `lib/config.{js,d.ts}`, `lib/tools.{js,d.ts}`, `lib/runtime.{js,d.ts}`, and `lib/tool-contracts.{js,d.ts}`. Repository policy is unchanged.
+
+## Fix round 2
+
+### Finding and implementation
+
+Fixed a Node 24 unhandled-rejection window in runtime disposal. The limiter still starts disposal immediately so cancellation happens before deferred service cleanup, but its promise now immediately maps both fulfillment and rejection into a retained `CleanupOutcome`. After service or repository cleanup finishes, runtime disposal awaits that non-rejecting outcome and appends any limiter failure in the existing deterministic aggregation order. Early cancellation, later drain waiting, all-error aggregation, and idempotent disposal are preserved.
+
+Added a deterministic regression test in `test/runtime.test.ts`: the limiter rejects immediately while service cleanup remains deferred through the next event-loop turn. Before the source fix, Node's test runner reported the unhandled limiter rejection and `PromiseRejectionHandledWarning`; after the fix, the test verifies the final aggregate retains the service error followed by the limiter error. The test installs no process-level rejection listeners, so it cannot leak listeners into other tests.
+
+The first build exposed a TypeScript inference error because `.then<CleanupOutcome>` specifies only the fulfillment result generic and leaves the rejection result as `never`. The final source explicitly uses `.then<CleanupOutcome, CleanupOutcome>`, preserving the same runtime semantics while type-checking both outcome handlers.
+
+### TDD evidence
+
+RED command:
+
+```text
+node --import tsx --test test/runtime.test.ts
+```
+
+RED result after removing all test-installed process listeners: exit 1; 4 passed and 1 failed. Node reported `Error: limiter cleanup failed` for the new test and emitted `PromiseRejectionHandledWarning`, proving the limiter rejection was first handled only after deferred service cleanup resumed.
+
+GREEN command:
+
+```text
+node --import tsx --test test/runtime.test.ts
+```
+
+GREEN result: exit 0; 5 passed, 0 failed. A subsequent focused runtime rerun after the TypeScript generic correction also passed 5/5.
+
+### Verification
+
+```text
+node --import tsx --test test/runtime.test.ts test/plugin-load.test.ts test/load.test.ts test/tools.test.ts
+```
+
+Result: exit 0; 42 passed, 0 failed.
+
+```text
+npm run build
+```
+
+Result: exit 0 after correcting both `Promise.then` result generics. Generated `lib/runtime.js` contains the same immediate outcome mapping and later ordered inspection as `src/runtime.ts`; the private `CleanupOutcome` type does not alter the public declaration output.
+
+The first `npm test` run reported 437/438: an unrelated installer fixed-error-line test observed empty stdout. Its exact isolated rerun passed 1/1, exit 0. A fresh full rerun then completed successfully:
+
+```text
+npm test
+```
+
+Result: exit 0; 438 passed, 0 failed, 0 cancelled, 0 skipped; duration 118710 ms.
+
+```text
+npm run test:load-profile
+```
+
+Result: exit 0. Output: `{"profileSmoke":"ok","tools":7,"networkCalls":0,"pendingTimers":0}`.
