@@ -30,7 +30,7 @@ test('initializes MCP and lists the exact canonical seven-tool contract', async 
   await managed.server.connect(serverTransport);
   await client.connect(clientTransport);
   try {
-    assert.deepEqual(client.getServerVersion(), { name: 'dsh-market-intelligence', version: '0.1.1' });
+    assert.deepEqual(client.getServerVersion(), { name: 'dsh-market-intelligence', version: '0.2.0' });
     assert.deepEqual(client.getServerCapabilities(), { tools: {} });
     const listed = await client.listTools();
     const canonical = createMarketToolContracts(fixture.service, fixture.runtime.paths);

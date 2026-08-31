@@ -10,7 +10,7 @@ permissions:
 jobs:
   verify:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
@@ -28,8 +28,20 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Build Claude MCPB
+        run: npm run build:claude
+
+      - name: Typecheck Claude adapter
+        run: npm run typecheck:claude
+
       - name: Test
         run: npm test
+
+      - name: Validate Claude MCPB package and adapter
+        run: npm run test:claude
+
+      - name: Smoke-test Claude MCPB over MCP stdio
+        run: npm run test:claude:smoke
 
       - name: Test installer with Windows PowerShell 5.1
         run: npm run test:installer:windows-powershell

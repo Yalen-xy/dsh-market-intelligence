@@ -13,7 +13,7 @@ jobs:
     permissions:
       contents: write
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
@@ -31,8 +31,20 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Build Claude MCPB
+        run: npm run build:claude
+
+      - name: Typecheck Claude adapter
+        run: npm run typecheck:claude
+
       - name: Test
         run: npm test
+
+      - name: Validate Claude MCPB package and adapter
+        run: npm run test:claude
+
+      - name: Smoke-test Claude MCPB over MCP stdio
+        run: npm run test:claude:smoke
 
       - name: Run profile smoke test
         run: npm run test:load-profile
@@ -52,7 +64,7 @@ jobs:
             throw 'npm pack did not produce exactly one package'
           }
           $packageFile = $pack[0].filename
-          node scripts/stage-release.mjs --tag $env:GITHUB_REF_NAME --package $packageFile --output .release
+          node scripts/stage-release.mjs --tag $env:GITHUB_REF_NAME --package $packageFile --claude .artifacts\claude-market-intelligence-latest.mcpb --output .release
 
       - name: Write fixed Release notes
         shell: pwsh
@@ -62,11 +74,11 @@ jobs:
 
           ## Requirements
 
-          Windows DSH Desktop with a valid managed desktop profile, Node.js ^22.19.0 or >=24.0.0, and Windows PowerShell 5.1 or PowerShell 7.
+          Windows with either DeepSeek Harness configured through a valid managed desktop profile or Claude Desktop, plus Node.js ^22.19.0 or >=24.0.0. The DSH installer requires Windows PowerShell 5.1 or PowerShell 7.
 
           ## Material changes
 
-          This release contains the compiled DSH market-information plugin and its integrity-checked Windows install, upgrade, rollback, and uninstall scripts.
+          This release contains separate DSH and Claude installation assets under the same license and disclaimer: the compiled DeepSeek Harness market-information plugin with its integrity-checked Windows lifecycle scripts, and the one-click Claude MCPB extension.
 
           ## Known provider limitations and disclaimer
 
@@ -84,14 +96,15 @@ jobs:
           $expectedAssets = @(
             ".release\dsh-market-intelligence-${version}.tgz"
             '.release\dsh-market-intelligence-latest.zip'
+            '.release\claude-market-intelligence-latest.mcpb'
             '.release\install.ps1'
             '.release\uninstall.ps1'
             '.release\SHA256SUMS.txt'
             '.release\LICENSE.txt'
           )
           $releaseEntries = @(Get-ChildItem -LiteralPath .release -Force)
-          if ($releaseEntries.Count -ne 6 -or @($releaseEntries | Where-Object { $_.PSIsContainer }).Count -ne 0) {
-            throw 'staged release must contain exactly six files'
+          if ($releaseEntries.Count -ne 7 -or @($releaseEntries | Where-Object { $_.PSIsContainer }).Count -ne 0) {
+            throw 'staged release must contain exactly seven files'
           }
           foreach ($asset in $expectedAssets) {
             if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
@@ -101,6 +114,7 @@ jobs:
           gh release create $env:GITHUB_REF_NAME `
             .release\dsh-market-intelligence-${version}.tgz `
             .release\dsh-market-intelligence-latest.zip `
+            .release\claude-market-intelligence-latest.mcpb `
             .release\install.ps1 `
             .release\uninstall.ps1 `
             .release\SHA256SUMS.txt `

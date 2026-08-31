@@ -15,14 +15,17 @@ import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { promisify } from 'node:util';
 import { gzipSync } from 'node:zlib';
+import { zipSync } from 'fflate';
+import { createClaudeManifest } from '../claude/manifest.ts';
 import { stageRelease } from '../scripts/stage-release.mjs';
 
 const execFileAsync = promisify(execFile);
-const version = '0.1.0';
+const version = '0.2.0';
 const expectedAssets = [
   'LICENSE.txt',
   'SHA256SUMS.txt',
-  'dsh-market-intelligence-0.1.0.tgz',
+  'claude-market-intelligence-latest.mcpb',
+  'dsh-market-intelligence-0.2.0.tgz',
   'dsh-market-intelligence-latest.zip',
   'install.ps1',
   'uninstall.ps1',
@@ -31,7 +34,7 @@ const expectedAssets = [
 const expectedCustomerArchiveEntries = [
   'LICENSE.txt',
   'SHA256SUMS.txt',
-  'dsh-market-intelligence-0.1.0.tgz',
+  'dsh-market-intelligence-0.2.0.tgz',
   'install.ps1',
   'uninstall.ps1',
   'INSTALL.cmd',
@@ -40,18 +43,20 @@ const expectedCustomerArchiveEntries = [
 test('stages exactly the verified release assets with canonical checksums', async (t) => {
   const fixture = await createStageFixture(t);
 
-  await stageRelease({ tag: 'v0.1.0', packagePath: fixture.packagePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root });
+  await stageFixture(fixture);
 
   assert.deepEqual((await readdir(fixture.outputDirectory)).sort(), [...expectedAssets].sort());
   assert.deepEqual(await readFile(path.join(fixture.root, 'LICENSE')), await readFile(path.join(fixture.outputDirectory, 'LICENSE.txt')));
-  assert.deepEqual(await readFile(fixture.packagePath), await readFile(path.join(fixture.outputDirectory, 'dsh-market-intelligence-0.1.0.tgz')));
+  assert.deepEqual(await readFile(fixture.packagePath), await readFile(path.join(fixture.outputDirectory, 'dsh-market-intelligence-0.2.0.tgz')));
+  assert.deepEqual(await readFile(fixture.claudePath), await readFile(path.join(fixture.outputDirectory, 'claude-market-intelligence-latest.mcpb')));
 
   const manifest = await readFile(path.join(fixture.outputDirectory, 'SHA256SUMS.txt'), 'utf8');
   const rows = manifest.trimEnd().split('\n');
   assert.equal(manifest.endsWith('\n'), true);
   assert.deepEqual(rows.map((row) => row.slice(66)), [
     'LICENSE.txt',
-    'dsh-market-intelligence-0.1.0.tgz',
+    'claude-market-intelligence-latest.mcpb',
+    'dsh-market-intelligence-0.2.0.tgz',
     'install.ps1',
     'uninstall.ps1',
   ]);
@@ -65,7 +70,7 @@ test('stages exactly the verified release assets with canonical checksums', asyn
 
 test('stages one fixed-name customer ZIP containing the verified release payloads and a double-click launcher', async (t) => {
   const fixture = await createStageFixture(t);
-  await stageRelease({ tag: 'v0.1.0', packagePath: fixture.packagePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root });
+  await stageFixture(fixture);
 
   const archivePath = path.join(fixture.outputDirectory, 'dsh-market-intelligence-latest.zip');
   const listing = await execFileAsync('tar.exe', ['-tf', archivePath], { encoding: 'utf8', windowsHide: true });
@@ -83,44 +88,102 @@ test('stages one fixed-name customer ZIP containing the verified release payload
   }
   const launcher = await readFile(path.join(extracted, 'INSTALL.cmd'), 'utf8');
   assert.match(launcher, /install\.ps1/);
-  assert.match(launcher, /-Version "0\.1\.0"/);
-  assert.match(launcher, /releases\/tags\/v0\.1\.0/);
+  assert.match(launcher, /-Version "0\.2\.0"/);
+  assert.match(launcher, /releases\/tags\/v0\.2\.0/);
   assert.doesNotMatch(launcher, /-AcceptLicense/);
 });
 
 test('rejects tags and package metadata that cannot identify an exact stable release', async (t) => {
   const fixture = await createStageFixture(t);
   for (const tag of ['v01.0.0', 'v1.00.0', 'v1.0.00', 'v1.0', 'v1.0.0-beta.1', 'v1.0.0+build', 'latest']) {
-    await assert.rejects(stageRelease({ tag, packagePath: fixture.packagePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root }), /stable release tag/i);
+    await assert.rejects(stageRelease({ tag, packagePath: fixture.packagePath, claudePath: fixture.claudePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root }), /stable release tag/i);
   }
 
   const wrongName = await createPackage(fixture.root, { name: 'other-package', version });
-  await assert.rejects(stageRelease({ tag: 'v0.1.0', packagePath: wrongName, outputDirectory: path.join(fixture.root, 'wrong-name'), rootDirectory: fixture.root }), /package name/i);
+  await assert.rejects(stageRelease({ tag: 'v0.2.0', packagePath: wrongName, claudePath: fixture.claudePath, outputDirectory: path.join(fixture.root, 'wrong-name'), rootDirectory: fixture.root }), /package name/i);
 
-  const wrongVersion = await createPackage(fixture.root, { name: 'dsh-market-intelligence', version: '0.1.1' });
-  await assert.rejects(stageRelease({ tag: 'v0.1.0', packagePath: wrongVersion, outputDirectory: path.join(fixture.root, 'wrong-version'), rootDirectory: fixture.root }), /package version/i);
+  const wrongVersion = await createPackage(fixture.root, { name: 'dsh-market-intelligence', version: '0.2.1' });
+  await assert.rejects(stageRelease({ tag: 'v0.2.0', packagePath: wrongVersion, claudePath: fixture.claudePath, outputDirectory: path.join(fixture.root, 'wrong-version'), rootDirectory: fixture.root }), /package version/i);
+});
+
+test('rejects missing, mismatched, corrupt, symlinked, or overlapping Claude MCPB input', async (t) => {
+  const fixture = await createStageFixture(t);
+  const cases = [
+    {
+      name: 'missing',
+      claudePath: path.join(fixture.root, 'missing.mcpb'),
+      outputDirectory: path.join(fixture.root, 'missing-output'),
+      pattern: /Claude MCPB/i,
+    },
+    {
+      name: 'mismatched',
+      claudePath: await createClaudeMcpb(fixture.root, '0.2.1'),
+      outputDirectory: path.join(fixture.root, 'mismatched-output'),
+      pattern: /Claude MCPB version/i,
+    },
+    {
+      name: 'corrupt',
+      claudePath: path.join(fixture.root, 'corrupt.mcpb'),
+      outputDirectory: path.join(fixture.root, 'corrupt-output'),
+      pattern: /Claude MCPB archive/i,
+    },
+  ];
+  await writeFile(cases[2]!.claudePath, 'not a ZIP archive');
+  for (const entryCase of cases) {
+    await assert.rejects(
+      stageRelease({ tag: 'v0.2.0', packagePath: fixture.packagePath, claudePath: entryCase.claudePath, outputDirectory: entryCase.outputDirectory, rootDirectory: fixture.root }),
+      entryCase.pattern,
+      entryCase.name,
+    );
+    await assert.rejects(readdir(entryCase.outputDirectory), { code: 'ENOENT' });
+  }
+
+  const symlinkPath = path.join(fixture.root, 'linked.mcpb');
+  try {
+    await symlink(fixture.claudePath, symlinkPath, 'file');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') {
+      t.diagnostic('Windows does not permit test symlink creation');
+    } else {
+      throw error;
+    }
+  }
+  if (await pathExists(symlinkPath)) {
+    await assert.rejects(
+      stageRelease({ tag: 'v0.2.0', packagePath: fixture.packagePath, claudePath: symlinkPath, outputDirectory: path.join(fixture.root, 'symlink-output'), rootDirectory: fixture.root }),
+      /Claude MCPB.*ordinary file/i,
+    );
+  }
+
+  const overlapOutput = path.join(fixture.root, 'overlapping-output');
+  await mkdir(overlapOutput);
+  const overlappingMcpb = await createClaudeMcpb(overlapOutput, version);
+  await assert.rejects(
+    stageRelease({ tag: 'v0.2.0', packagePath: fixture.packagePath, claudePath: overlappingMcpb, outputDirectory: overlapOutput, rootDirectory: fixture.root }),
+    /overlaps source/i,
+  );
 });
 
 test('rejects archives and staging roots that do not meet installer safety requirements', async (t) => {
   const fixture = await createStageFixture(t);
   const missingPackageLicense = await createPackage(fixture.root, { name: 'dsh-market-intelligence', version, omit: 'LICENSE' });
-  await assert.rejects(stageRelease({ tag: 'v0.1.0', packagePath: missingPackageLicense, outputDirectory: path.join(fixture.root, 'missing-entry'), rootDirectory: fixture.root }), /package archive entries invalid/i);
+  await assert.rejects(stageRelease({ tag: 'v0.2.0', packagePath: missingPackageLicense, claudePath: fixture.claudePath, outputDirectory: path.join(fixture.root, 'missing-entry'), rootDirectory: fixture.root }), /package archive entries invalid/i);
 
   await mkdir(fixture.outputDirectory);
   await writeFile(path.join(fixture.outputDirectory, 'unexpected.txt'), 'do not overwrite');
-  await assert.rejects(stageRelease({ tag: 'v0.1.0', packagePath: fixture.packagePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root }), /output target/i);
+  await assert.rejects(stageRelease({ tag: 'v0.2.0', packagePath: fixture.packagePath, claudePath: fixture.claudePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root }), /output target/i);
 
   const noLicenseRoot = path.join(fixture.root, 'no-license');
   await copyFixtureRoot(fixture.root, noLicenseRoot);
   await rm(path.join(noLicenseRoot, 'LICENSE'));
-  await assert.rejects(stageRelease({ tag: 'v0.1.0', packagePath: fixture.packagePath, outputDirectory: path.join(fixture.root, 'no-license-output'), rootDirectory: noLicenseRoot }), /license/i);
+  await assert.rejects(stageRelease({ tag: 'v0.2.0', packagePath: fixture.packagePath, claudePath: fixture.claudePath, outputDirectory: path.join(fixture.root, 'no-license-output'), rootDirectory: noLicenseRoot }), /license/i);
 });
 
 test('produces byte-identical assets and manifest when staging identical inputs twice', async (t) => {
   const fixture = await createStageFixture(t);
   const secondOutput = path.join(fixture.root, 'release-second');
-  await stageRelease({ tag: 'v0.1.0', packagePath: fixture.packagePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root });
-  await stageRelease({ tag: 'v0.1.0', packagePath: fixture.packagePath, outputDirectory: secondOutput, rootDirectory: fixture.root });
+  await stageFixture(fixture);
+  await stageRelease({ tag: 'v0.2.0', packagePath: fixture.packagePath, claudePath: fixture.claudePath, outputDirectory: secondOutput, rootDirectory: fixture.root });
 
   for (const asset of expectedAssets) {
     assert.deepEqual(await readFile(path.join(fixture.outputDirectory, asset)), await readFile(path.join(secondOutput, asset)), asset);
@@ -130,7 +193,7 @@ test('produces byte-identical assets and manifest when staging identical inputs 
 test('stages assets through the documented command-line interface', async (t) => {
   const fixture = await createStageFixture(t);
   const scriptPath = path.join(process.cwd(), 'scripts', 'stage-release.mjs');
-  await execFileAsync(process.execPath, [scriptPath, '--tag', 'v0.1.0', '--package', fixture.packagePath, '--output', fixture.outputDirectory], {
+  await execFileAsync(process.execPath, [scriptPath, '--tag', 'v0.2.0', '--package', fixture.packagePath, '--claude', fixture.claudePath, '--output', fixture.outputDirectory], {
     windowsHide: true,
   });
   assert.deepEqual((await readdir(fixture.outputDirectory)).sort(), [...expectedAssets].sort());
@@ -144,8 +207,9 @@ test('CLI reports a fixed error when the staging temp cannot be created', async 
       '--permission',
       '--allow-fs-read=*',
       scriptPath,
-      '--tag', 'v0.1.0',
+      '--tag', 'v0.2.0',
       '--package', fixture.packagePath,
+      '--claude', fixture.claudePath,
       '--output', fixture.outputDirectory,
     ], { windowsHide: true }),
     (error: NodeJS.ErrnoException & { stderr?: string | Buffer }) => {
@@ -178,7 +242,7 @@ test('rejects noncanonical and ambiguous tar entry names before creating output'
       const outputDirectory = path.join(fixture.root, `reject-${entryCase.name.replaceAll(' ', '-')}`);
       const packagePath = await createRawPackage(fixture.root, entryCase.entries);
       await assert.rejects(
-        stageRelease({ tag: 'v0.1.0', packagePath, outputDirectory, rootDirectory: fixture.root }),
+        stageRelease({ tag: 'v0.2.0', packagePath, claudePath: fixture.claudePath, outputDirectory, rootDirectory: fixture.root }),
         /package archive entries invalid/i,
       );
       await assert.rejects(readdir(outputDirectory), { code: 'ENOENT' });
@@ -196,7 +260,7 @@ test('rejects a required archive member that is not an ordinary file', async (t)
   );
   const outputDirectory = path.join(fixture.root, 'directory-license');
   await assert.rejects(
-    stageRelease({ tag: 'v0.1.0', packagePath, outputDirectory, rootDirectory: fixture.root }),
+    stageRelease({ tag: 'v0.2.0', packagePath, claudePath: fixture.claudePath, outputDirectory, rootDirectory: fixture.root }),
     /package archive entries invalid/i,
   );
   await assert.rejects(readdir(outputDirectory), { code: 'ENOENT' });
@@ -207,29 +271,31 @@ test('retains a diagnostic temp after an invalid staged tarball and retries the 
   const validPackage = await readFile(fixture.packagePath);
   await writeFile(fixture.packagePath, Buffer.from('invalid staged tarball'));
   await assert.rejects(
-    stageRelease({ tag: 'v0.1.0', packagePath: fixture.packagePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root }),
+    stageRelease({ tag: 'v0.2.0', packagePath: fixture.packagePath, claudePath: fixture.claudePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root }),
     /package archive could not be inspected/i,
   );
   await assert.rejects(readdir(fixture.outputDirectory), { code: 'ENOENT' });
   assert.equal((await stageDirectories(fixture.root)).length, 1);
   await writeFile(fixture.packagePath, validPackage);
-  await stageRelease({ tag: 'v0.1.0', packagePath: fixture.packagePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root });
+  await stageFixture(fixture);
   assert.deepEqual((await readdir(fixture.outputDirectory)).sort(), [...expectedAssets].sort());
   assert.equal((await stageDirectories(fixture.root)).length, 1);
 });
 
-test('snapshots all four sources and ignores caller-provided hook objects', async (t) => {
+test('snapshots all five sources and ignores caller-provided hook objects', async (t) => {
   const fixture = await createStageFixture(t);
   const sources = await Promise.all([
     readFile(fixture.packagePath),
     readFile(path.join(fixture.root, 'installer', 'install.ps1')),
     readFile(path.join(fixture.root, 'installer', 'uninstall.ps1')),
     readFile(path.join(fixture.root, 'LICENSE')),
+    readFile(fixture.claudePath),
   ]);
   let called = false;
   await stageRelease({
-    tag: 'v0.1.0',
+    tag: 'v0.2.0',
     packagePath: fixture.packagePath,
+    claudePath: fixture.claudePath,
     outputDirectory: fixture.outputDirectory,
     rootDirectory: fixture.root,
     dependencies: {
@@ -242,19 +308,20 @@ test('snapshots all four sources and ignores caller-provided hook objects', asyn
     writeFile(path.join(fixture.root, 'installer', 'install.ps1'), 'source changed after staging'),
     writeFile(path.join(fixture.root, 'installer', 'uninstall.ps1'), 'source changed after staging'),
     writeFile(path.join(fixture.root, 'LICENSE'), 'source changed after staging'),
+    writeFile(fixture.claudePath, 'source changed after staging'),
   ]);
-  for (const [index, name] of ['dsh-market-intelligence-0.1.0.tgz', 'install.ps1', 'uninstall.ps1', 'LICENSE.txt'].entries()) {
+  for (const [index, name] of ['dsh-market-intelligence-0.2.0.tgz', 'install.ps1', 'uninstall.ps1', 'LICENSE.txt', 'claude-market-intelligence-latest.mcpb'].entries()) {
     assert.deepEqual(await readFile(path.join(fixture.outputDirectory, name)), sources[index], name);
   }
 });
 
 test('has no post-verification hook or unverified commit path', async (t) => {
   const fixture = await createStageFixture(t);
-  await stageRelease({ tag: 'v0.1.0', packagePath: fixture.packagePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root });
+  await stageFixture(fixture);
   assert.deepEqual((await readdir(fixture.outputDirectory)).sort(), [...expectedAssets].sort());
   const source = await readFile(path.join(process.cwd(), 'scripts', 'stage-release.mjs'), 'utf8');
   assert.doesNotMatch(source, /dependencies|beforeCommitImpl|resolveStageDependencies/);
-  assert.match(source, /await assertFilesExist\(sourceAssets\.slice\(1\)\);\s*assertOutputDoesNotOverlapSources\([^;]+;[\s\S]*?const temporaryOutput[\s\S]*?for \(const asset of sourceAssets\)/);
+  assert.match(source, /await assertFilesExist\(dshSourceAssets\.slice\(1\)\);\s*await assertClaudeSource\(sourceClaude\);\s*assertOutputDoesNotOverlapSources\([^;]+;[\s\S]*?const temporaryOutput[\s\S]*?for \(const asset of sourceAssets\)/);
   assert.match(source, /await verifyStagedAssets\([^;]+;\s*await assertOutputTargetAbsent\(output\);\s*await rename\(temporaryOutput, output\);/s);
 });
 
@@ -265,7 +332,7 @@ test('requires directory names to agree with tar member types', async (t) => {
     [{ name: 'package/cache', content: Buffer.alloc(0), type: '5' }],
   );
   await assert.rejects(
-    stageRelease({ tag: 'v0.1.0', packagePath: noncanonicalDirectory, outputDirectory: path.join(fixture.root, 'bad-directory'), rootDirectory: fixture.root }),
+    stageRelease({ tag: 'v0.2.0', packagePath: noncanonicalDirectory, claudePath: fixture.claudePath, outputDirectory: path.join(fixture.root, 'bad-directory'), rootDirectory: fixture.root }),
     /package archive entries invalid/i,
   );
   const canonicalDirectory = await createRawPackage(
@@ -273,7 +340,7 @@ test('requires directory names to agree with tar member types', async (t) => {
     [{ name: 'package/cache/', content: Buffer.alloc(0), type: '5' }],
   );
   const outputDirectory = path.join(fixture.root, 'canonical-directory');
-  await stageRelease({ tag: 'v0.1.0', packagePath: canonicalDirectory, outputDirectory, rootDirectory: fixture.root });
+  await stageRelease({ tag: 'v0.2.0', packagePath: canonicalDirectory, claudePath: fixture.claudePath, outputDirectory, rootDirectory: fixture.root });
   assert.deepEqual((await readdir(outputDirectory)).sort(), [...expectedAssets].sort());
 });
 
@@ -281,7 +348,7 @@ test('rejects source overlap and an existing output link without altering source
   const fixture = await createStageFixture(t);
   const licenseBefore = await readFile(path.join(fixture.root, 'LICENSE'));
   await assert.rejects(
-    stageRelease({ tag: 'v0.1.0', packagePath: fixture.packagePath, outputDirectory: fixture.root, rootDirectory: fixture.root }),
+    stageRelease({ tag: 'v0.2.0', packagePath: fixture.packagePath, claudePath: fixture.claudePath, outputDirectory: fixture.root, rootDirectory: fixture.root }),
     /overlaps source/i,
   );
   assert.deepEqual(await readFile(path.join(fixture.root, 'LICENSE')), licenseBefore);
@@ -292,7 +359,7 @@ test('rejects source overlap and an existing output link without altering source
   await writeFile(sentinel, 'preserve me');
   await symlink(protectedDirectory, fixture.outputDirectory, 'junction');
   await assert.rejects(
-    stageRelease({ tag: 'v0.1.0', packagePath: fixture.packagePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root }),
+    stageRelease({ tag: 'v0.2.0', packagePath: fixture.packagePath, claudePath: fixture.claudePath, outputDirectory: fixture.outputDirectory, rootDirectory: fixture.root }),
     /output target/i,
   );
   assert.equal(await readFile(sentinel, 'utf8'), 'preserve me');
@@ -303,9 +370,9 @@ test('CLI rejects missing, duplicate, and unknown arguments without printing loc
   const scriptPath = path.join(process.cwd(), 'scripts', 'stage-release.mjs');
   const cases = [
     [],
-    ['--tag', 'v0.1.0', '--package', fixture.packagePath],
-    ['--tag', 'v0.1.0', '--tag', 'v0.1.0', '--package', fixture.packagePath, '--output', fixture.outputDirectory],
-    ['--tag', 'v0.1.0', '--package', fixture.packagePath, '--output', fixture.outputDirectory, '--extra', 'value'],
+    ['--tag', 'v0.2.0', '--package', fixture.packagePath, '--output', fixture.outputDirectory],
+    ['--tag', 'v0.2.0', '--tag', 'v0.2.0', '--package', fixture.packagePath, '--claude', fixture.claudePath, '--output', fixture.outputDirectory],
+    ['--tag', 'v0.2.0', '--package', fixture.packagePath, '--claude', fixture.claudePath, '--output', fixture.outputDirectory, '--extra', 'value'],
   ];
   for (const argumentsList of cases) {
     await assert.rejects(
@@ -318,7 +385,24 @@ test('CLI rejects missing, duplicate, and unknown arguments without printing loc
   }
 });
 
-async function createStageFixture(t: TestContext): Promise<{ root: string; packagePath: string; outputDirectory: string }> {
+interface StageFixture {
+  claudePath: string;
+  outputDirectory: string;
+  packagePath: string;
+  root: string;
+}
+
+async function stageFixture(fixture: StageFixture): Promise<void> {
+  await stageRelease({
+    tag: 'v0.2.0',
+    packagePath: fixture.packagePath,
+    claudePath: fixture.claudePath,
+    outputDirectory: fixture.outputDirectory,
+    rootDirectory: fixture.root,
+  });
+}
+
+async function createStageFixture(t: TestContext): Promise<StageFixture> {
   const root = await mkdtemp(path.join(process.cwd(), '.tmp-release-artifacts-'));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   await mkdir(path.join(root, 'installer'), { recursive: true });
@@ -328,8 +412,21 @@ async function createStageFixture(t: TestContext): Promise<{ root: string; packa
   return {
     root,
     packagePath: await createPackage(root, { name: 'dsh-market-intelligence', version }),
+    claudePath: await createClaudeMcpb(root, version),
     outputDirectory: path.join(root, 'release'),
   };
+}
+
+async function createClaudeMcpb(root: string, manifestVersion: string): Promise<string> {
+  const mcpbPath = path.join(root, `claude-${manifestVersion}-${crypto.randomUUID()}.mcpb`);
+  const manifest = Buffer.from(`${JSON.stringify(createClaudeManifest(manifestVersion), null, 2)}\n`, 'utf8');
+  const bytes = zipSync({
+    LICENSE: Buffer.from('limited use license\n', 'utf8'),
+    'manifest.json': manifest,
+    'server/index.js': Buffer.from('export {};\n', 'utf8'),
+  }, { level: 0 });
+  await writeFile(mcpbPath, bytes);
+  return mcpbPath;
 }
 
 async function createPackage(root: string, options: { name: string; version: string; omit?: 'LICENSE' }): Promise<string> {
@@ -434,6 +531,16 @@ async function stageDirectories(root: string): Promise<string[]> {
   return (await readdir(root, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory() && entry.name.startsWith('.stage-release-'))
     .map((entry) => entry.name);
+}
+
+async function pathExists(candidate: string): Promise<boolean> {
+  try {
+    await readFile(candidate);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 function sha256(value: Buffer): string {

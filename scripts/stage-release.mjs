@@ -14,6 +14,8 @@ import {
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { McpbManifestSchema } from '@anthropic-ai/mcpb/schemas/0.4';
+import { unzipSync } from 'fflate';
 
 const execFileAsync = promisify(execFile);
 const packageName = 'dsh-market-intelligence';
@@ -26,19 +28,25 @@ const requiredPackageEntries = [
 ];
 const customerArchiveName = 'dsh-market-intelligence-latest.zip';
 const customerLauncherName = 'INSTALL.cmd';
+const claudeArchiveName = 'claude-market-intelligence-latest.mcpb';
+const requiredClaudeEntries = ['LICENSE', 'manifest.json', 'server/index.js'];
 
-export async function stageRelease({ tag, packagePath, outputDirectory, rootDirectory = projectRoot() }) {
+export async function stageRelease({ tag, packagePath, claudePath, outputDirectory, rootDirectory = projectRoot() }) {
   const version = parseStableTag(tag);
   const sourcePackage = path.resolve(packagePath);
+  if (typeof claudePath !== 'string' || claudePath.length === 0) throw new Error('Claude MCPB input is required for release staging');
+  const sourceClaude = path.resolve(claudePath);
   const requestedOutput = path.resolve(outputDirectory);
   const root = path.resolve(rootDirectory);
-  const sourceAssets = [
+  const dshSourceAssets = [
     { source: sourcePackage, destination: `${packageName}-${version}.tgz` },
     { source: path.join(root, 'installer', 'install.ps1'), destination: 'install.ps1' },
     { source: path.join(root, 'installer', 'uninstall.ps1'), destination: 'uninstall.ps1' },
     { source: path.join(root, 'LICENSE'), destination: 'LICENSE.txt' },
   ];
-  await assertFilesExist(sourceAssets.slice(1));
+  const sourceAssets = [...dshSourceAssets, { source: sourceClaude, destination: claudeArchiveName }];
+  await assertFilesExist(dshSourceAssets.slice(1));
+  await assertClaudeSource(sourceClaude);
   assertOutputDoesNotOverlapSources(requestedOutput, sourceAssets);
   const output = await resolveOutputPath(requestedOutput);
   await assertOutputTargetAbsent(output);
@@ -50,9 +58,10 @@ export async function stageRelease({ tag, packagePath, outputDirectory, rootDire
     }
     const metadata = await readPackageMetadata(stagedPackage);
     validatePackageMetadata(metadata, version);
+    await validateClaudeMcpb(path.join(temporaryOutput, claudeArchiveName), version);
     const manifest = await createManifest(temporaryOutput, sourceAssets.map((asset) => asset.destination));
     await writeFile(path.join(temporaryOutput, 'SHA256SUMS.txt'), manifest, { flag: 'wx' });
-    const customerArchive = await createCustomerArchive(temporaryOutput, version, sourceAssets.map((asset) => asset.destination));
+    const customerArchive = await createCustomerArchive(temporaryOutput, version, dshSourceAssets.map((asset) => asset.destination));
     await writeFile(path.join(temporaryOutput, customerArchiveName), customerArchive, { flag: 'wx' });
     await verifyStagedAssets(
       temporaryOutput,
@@ -69,7 +78,7 @@ export async function stageRelease({ tag, packagePath, outputDirectory, rootDire
 }
 
 function isSafeStagedValidationError(error) {
-  return error instanceof Error && /^package (archive|metadata|name|version)/.test(error.message);
+  return error instanceof Error && /^(package (archive|metadata|name|version)|Claude MCPB)/.test(error.message);
 }
 
 function projectRoot() {
@@ -194,6 +203,42 @@ function validatePackageMetadata(metadata, version) {
   if (metadata.main !== './lib/index.js' || metadata.license !== 'SEE LICENSE IN LICENSE' ||
       metadata.dsh?.bundle?.patch !== './cordis.patch.yml') {
     throw new Error('package metadata is not compatible with the installer');
+  }
+}
+
+async function assertClaudeSource(source) {
+  let entry;
+  try {
+    entry = await lstat(source);
+  } catch {
+    throw new Error('Claude MCPB input is required for release staging');
+  }
+  if (!entry.isFile() || entry.isSymbolicLink()) throw new Error('Claude MCPB input must be an ordinary file');
+}
+
+async function validateClaudeMcpb(archivePath, version) {
+  let archive;
+  try {
+    archive = unzipSync(await readFile(archivePath));
+  } catch {
+    throw new Error('Claude MCPB archive is unreadable');
+  }
+  const names = Object.keys(archive).sort();
+  if (names.length !== requiredClaudeEntries.length ||
+      names.some((name, index) => name !== requiredClaudeEntries[index])) {
+    throw new Error('Claude MCPB archive contains invalid files');
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(Buffer.from(archive['manifest.json']).toString('utf8'));
+  } catch {
+    throw new Error('Claude MCPB manifest is invalid');
+  }
+  if (!McpbManifestSchema.safeParse(manifest).success || manifest.manifest_version !== '0.4' || manifest.name !== packageName) {
+    throw new Error('Claude MCPB manifest is invalid');
+  }
+  if (manifest.version !== version || !semanticVersionPattern.test(manifest.version)) {
+    throw new Error('Claude MCPB version must exactly match the release tag');
   }
 }
 
@@ -369,15 +414,20 @@ function parseArguments(argumentsList) {
   for (let index = 0; index < argumentsList.length; index += 2) {
     const key = argumentsList[index];
     const value = argumentsList[index + 1];
-    if (!['--tag', '--package', '--output'].includes(key) || value === undefined || values.has(key)) {
-      throw new Error('usage: node scripts/stage-release.mjs --tag vMAJOR.MINOR.PATCH --package <tgz> --output <dir>');
+    if (!['--tag', '--package', '--claude', '--output'].includes(key) || value === undefined || values.has(key)) {
+      throw new Error('usage: node scripts/stage-release.mjs --tag vMAJOR.MINOR.PATCH --package <tgz> --claude <mcpb> --output <dir>');
     }
     values.set(key, value);
   }
-  if (values.size !== 3) {
-    throw new Error('usage: node scripts/stage-release.mjs --tag vMAJOR.MINOR.PATCH --package <tgz> --output <dir>');
+  if (values.size !== 4) {
+    throw new Error('usage: node scripts/stage-release.mjs --tag vMAJOR.MINOR.PATCH --package <tgz> --claude <mcpb> --output <dir>');
   }
-  return { tag: values.get('--tag'), packagePath: values.get('--package'), outputDirectory: values.get('--output') };
+  return {
+    tag: values.get('--tag'),
+    packagePath: values.get('--package'),
+    claudePath: values.get('--claude'),
+    outputDirectory: values.get('--output'),
+  };
 }
 
 const invokedDirectly = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;

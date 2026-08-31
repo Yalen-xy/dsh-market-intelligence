@@ -5,7 +5,7 @@ import test from 'node:test';
 
 const workflowRoot = path.join(process.cwd(), '.github', 'workflows');
 
-test('CI keeps build, test, and package gates and adds both Windows installer shells', async () => {
+test('CI builds, typechecks, package-validates, and smoke-tests DSH and Claude on Windows', async () => {
   const workflow = await readFile(path.join(workflowRoot, 'ci.yml'), 'utf8');
 
   assert.match(workflow, /^['"]on['"]:/m);
@@ -14,13 +14,18 @@ test('CI keeps build, test, and package gates and adds both Windows installer sh
   assert.match(workflow, /node-version:\s*24/);
   assert.match(workflow, /cache:\s*npm/);
   const ciJob = extractJob(workflow, 'verify');
+  assert.match(ciJob, /runs-on:\s*windows-latest/);
   const timeout = /timeout-minutes:\s*(\d+)/.exec(ciJob);
   assert.ok(timeout, 'expected an explicit CI timeout');
-  assert.ok(Number(timeout[1]) >= 30, `expected CI timeout of at least 30 minutes, got ${timeout[1]}`);
+  assert.ok(Number(timeout[1]) >= 45, `expected CI timeout of at least 45 minutes, got ${timeout[1]}`);
   assertInOrder(workflow, [
     'npm ci',
     'npm run build',
+    'npm run build:claude',
+    'npm run typecheck:claude',
     'npm test',
+    'npm run test:claude',
+    'npm run test:claude:smoke',
     'npm run test:installer:windows-powershell',
     'npm run test:installer:pwsh',
     'npm pack --dry-run --ignore-scripts',
@@ -38,6 +43,9 @@ test('Release is tag-only, Windows-only, and scopes write permission to its job'
   const releaseJob = extractJob(workflow, 'release');
   assert.match(releaseJob, /runs-on:\s*windows-latest/);
   assert.match(releaseJob, /^\s{4}permissions:\s*\r?\n\s{6}contents:\s*write\s*$/m);
+  const timeout = /timeout-minutes:\s*(\d+)/.exec(releaseJob);
+  assert.ok(timeout, 'expected an explicit Release timeout');
+  assert.ok(Number(timeout[1]) >= 45, `expected Release timeout of at least 45 minutes, got ${timeout[1]}`);
 });
 
 test('Release validates the package and both PowerShell environments before publishing exactly staged assets', async () => {
@@ -51,7 +59,11 @@ test('Release validates the package and both PowerShell environments before publ
   assertInOrder(releaseJob, [
     'npm ci',
     'npm run build',
+    'npm run build:claude',
+    'npm run typecheck:claude',
     'npm test',
+    'npm run test:claude',
+    'npm run test:claude:smoke',
     'npm run test:load-profile',
     'npm run test:installer:windows-powershell',
     'npm run test:installer:pwsh',
@@ -63,6 +75,7 @@ test('Release validates the package and both PowerShell environments before publ
 
   assert.match(releaseJob, /--tag\s+\$env:GITHUB_REF_NAME/);
   assert.match(releaseJob, /--package\s+\$packageFile/);
+  assert.match(releaseJob, /--claude\s+\.artifacts\\claude-market-intelligence-latest\.mcpb/);
   assert.match(releaseJob, /--output\s+\.release/);
   const publishStep = extractStep(releaseJob, 'Publish GitHub Release');
   const publishCommand = /gh release create[\s\S]*?--verify-tag/.exec(publishStep)?.[0];
@@ -74,6 +87,7 @@ test('Release validates the package and both PowerShell environments before publ
     [
       '.release\\dsh-market-intelligence-${version}.tgz',
       '.release\\dsh-market-intelligence-latest.zip',
+      '.release\\claude-market-intelligence-latest.mcpb',
       '.release\\install.ps1',
       '.release\\uninstall.ps1',
       '.release\\SHA256SUMS.txt',
@@ -96,12 +110,17 @@ test('Release publication alone receives GH_TOKEN and notes are fixed, local, an
   const publishStep = extractStep(releaseJob, 'Publish GitHub Release');
   assert.match(publishStep, /GH_TOKEN:\s*\$\{\{ github\.token \}\}/);
   assert.match(releaseJob, /Set-Content\s+-LiteralPath\s+\.release-notes\.md/);
+  assert.match(releaseJob, /DeepSeek Harness/);
+  assert.match(releaseJob, /separate[^\r\n]*DSH[^\r\n]*Claude|DSH[^\r\n]*Claude[^\r\n]*separate/i);
+  assert.match(releaseJob, /same license/i);
+  assert.doesNotMatch(releaseJob, /DSH Desktop/);
   assert.match(releaseJob, /not investment advice/i);
   assert.match(releaseJob, /Tencent and Sina are not partners/i);
   assert.match(releaseJob, /upstream endpoints may change or become unavailable/i);
 
   assert.doesNotMatch(workflow, /uses:\s*[^\s]+\/[^\s]+release[^\s]*/i);
   assert.doesNotMatch(workflow, /smoke:live|LIVE_PROVIDER|TENCENT_SMOKE|SINA_SMOKE/i);
+  assert.equal((workflow.match(/test:claude:smoke/g) ?? []).length, 1);
 });
 
 function assertInOrder(text: string, fragments: string[]) {
