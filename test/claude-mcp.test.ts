@@ -273,6 +273,21 @@ test('runClaudeServer passes Claude config and base directory through runtime an
   await waitFor(() => fixture.disposeCalls() === 1);
 });
 
+test('runClaudeServer releases its runtime when the stdio input reaches EOF', async () => {
+  const fixture = createRuntimeFixture();
+  const stdin = new PassThrough();
+  await runClaudeServer({ LOCALAPPDATA: 'C:\\Users\\fixture\\AppData\\Local' }, {
+    stdin,
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    signals: new EventEmitter(),
+    runtimeFactory: async () => fixture.runtime,
+  });
+
+  stdin.end();
+  await waitFor(() => fixture.disposeCalls() === 1);
+});
+
 test('runClaudeServer does not construct transport after startup failure and rolls back connection failure', async () => {
   const environment = { LOCALAPPDATA: 'C:\\Users\\fixture\\AppData\\Local' };
   const failedStartup = createRuntimeFixture();

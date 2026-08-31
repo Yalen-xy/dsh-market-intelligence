@@ -82,21 +82,31 @@ export async function runClaudeServer(
   const managed = createClaudeMcpServer(() => runtime, logger);
   const signals = streams.signals ?? process;
   let shutdown: Promise<void> | undefined;
+  let shutdownKeepAlive: NodeJS.Timeout | undefined;
   const close = (): Promise<void> => {
     if (shutdown) return shutdown;
+    shutdownKeepAlive = setInterval(() => undefined, 1_000);
     shutdown = Promise.resolve().then(async () => {
       signals.off('SIGINT', handleSignal);
       signals.off('SIGTERM', handleSignal);
+      streams.stdin.off('end', handleInputEnd);
       await managed.close();
       logger.info('shutdown');
+    }).finally(() => {
+      if (shutdownKeepAlive !== undefined) clearInterval(shutdownKeepAlive);
+      shutdownKeepAlive = undefined;
     });
     return shutdown;
   };
   const handleSignal = (): void => {
     void close().catch(() => logger.error('internal'));
   };
+  const handleInputEnd = (): void => {
+    void close().catch(() => logger.error('internal'));
+  };
   signals.once('SIGINT', handleSignal);
   signals.once('SIGTERM', handleSignal);
+  streams.stdin.once('end', handleInputEnd);
   managed.server.onclose = handleSignal;
 
   try {

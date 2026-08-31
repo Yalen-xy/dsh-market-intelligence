@@ -21,6 +21,7 @@ export class ClaudeStdioServerTransport implements Transport {
   private buffer: Buffer | undefined;
   private readonly maxBufferSize: number;
   private started = false;
+  private closed = false;
 
   constructor(
     private readonly stdin: Readable,
@@ -48,6 +49,10 @@ export class ClaudeStdioServerTransport implements Transport {
     this.onerror?.(error);
   };
 
+  private readonly handleEnd = (): void => {
+    void this.close().catch((error: unknown) => this.onerror?.(asError(error)));
+  };
+
   async start(): Promise<void> {
     if (this.started) {
       throw new Error('ClaudeStdioServerTransport already started! If using Server class, note that connect() calls start() automatically.');
@@ -55,11 +60,15 @@ export class ClaudeStdioServerTransport implements Transport {
     this.started = true;
     this.stdin.on('data', this.handleData);
     this.stdin.on('error', this.handleError);
+    this.stdin.once('end', this.handleEnd);
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
     this.stdin.off('data', this.handleData);
     this.stdin.off('error', this.handleError);
+    this.stdin.off('end', this.handleEnd);
     if (this.stdin.listenerCount('data') === 0) this.stdin.pause();
     this.buffer = undefined;
     this.onclose?.();
