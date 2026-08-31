@@ -10,6 +10,7 @@ node_modules/
 coverage/
 *.log
 *.tgz
+.artifacts/
 .npm-cache/
 .DS_Store
 Thumbs.db
