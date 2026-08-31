@@ -52,6 +52,14 @@ export async function startMarketRuntime(
     if (disposal) return disposal;
     disposal = (async () => {
       const errors: unknown[] = [];
+      let limiterDrain: Promise<void> | undefined;
+      if (requestLimiter) {
+        try {
+          limiterDrain = requestLimiter.dispose();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
       if (service) {
         try {
           await service.dispose();
@@ -65,9 +73,9 @@ export async function startMarketRuntime(
           errors.push(error);
         }
       }
-      if (requestLimiter) {
+      if (limiterDrain) {
         try {
-          await requestLimiter.dispose();
+          await limiterDrain;
         } catch (error) {
           errors.push(error);
         }

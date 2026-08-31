@@ -83,3 +83,59 @@ Result: exit 0 (after the sandbox denied the real Windows `Get-CimInstance` prob
 ## Concerns
 
 `npm run build` updates tracked generated `lib/` artifacts (including prior Task 1 output). The Task 2 brief's prescribed commit command deliberately stages only `src/runtime.ts`, `src/index.ts`, `src/config.ts`, and `test/runtime.test.ts`; generated artifacts are therefore intentionally not included in this Task 2 commit.
+
+## Fix round 1
+
+### Finding and implementation
+
+Restored the original deadlock-safe runtime disposal semantics in `src/runtime.ts`. Runtime disposal now starts and retains `requestLimiter.dispose()` before awaiting service or repository cleanup, so active provider work is aborted immediately. It then completes service/repository cleanup and awaits the retained limiter drain promise. Synchronous limiter disposal exceptions, service/repository failures, and asynchronous limiter-drain failures are collected deterministically; the existing idempotent retained disposal promise remains the single cleanup result.
+
+Replaced the order-only lifecycle test with a deferred-cleanup test. The service waits for the limiter cancellation signal; the RED run timed out under the regressed service-first implementation, proving that cleanup could deadlock. The GREEN run proves cancellation happens first, service shutdown then settles, and the limiter drain is retained. Added coverage that service and limiter disposal rejections are both attempted and aggregate in stable order.
+
+### TDD evidence
+
+RED command:
+
+```text
+node --import tsx --test test/runtime.test.ts
+```
+
+RED result: exit 1; 1 passed and 3 failed. The primary new lifecycle test failed with `actual: 'timeout'` versus `expected: 'settled'`, proving the service waited forever because the limiter had not been cancelled. The rollback and aggregation tests also exposed the old service-before-limiter event order.
+
+GREEN command:
+
+```text
+node --import tsx --test test/runtime.test.ts
+```
+
+GREEN result: exit 0; 4 passed, 0 failed.
+
+### Verification
+
+```text
+node --import tsx --test test/runtime.test.ts test/plugin-load.test.ts test/load.test.ts test/tools.test.ts
+```
+
+Result: exit 0; 41 passed, 0 failed.
+
+```text
+npm run build
+```
+
+Result: exit 0.
+
+```text
+npm test
+```
+
+Result: exit 0; 437 passed, 0 failed, 0 cancelled, 0 skipped.
+
+```text
+npm run test:load-profile
+```
+
+Result: exit 0 with scoped host permission for the Windows CIM fixed-drive check. Output: `{"profileSmoke":"ok","tools":7,"networkCalls":0,"pendingTimers":0}`.
+
+### Controller ruling
+
+Although the original task brief showed a narrow source/test `git add` list, `package.json` builds and ships tracked `lib/` output. The complete verified generated output is therefore included in this fix-round commit: `lib/index.{js,d.ts}`, `lib/config.{js,d.ts}`, `lib/tools.{js,d.ts}`, `lib/runtime.{js,d.ts}`, and `lib/tool-contracts.{js,d.ts}`. Repository policy is unchanged.

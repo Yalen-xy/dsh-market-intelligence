@@ -14,14 +14,43 @@ const config: MarketRuntimeConfig = {
   watchlistLimit: 100,
 };
 
-test('starts shared runtime once and releases service before its request limiter', async () => {
+test('starts shared runtime once and cancels the limiter before waiting for service shutdown', async () => {
   const events: string[] = [];
-  const runtime = await startMarketRuntime(config, fixtureOptions(events));
+  let cancelLimiter: (() => void) | undefined;
+  const limiterCancelled = new Promise<void>((resolve) => { cancelLimiter = resolve; });
+  const options = fixtureOptions(events);
+  options.createRequestLimiter = () => ({
+    run: async () => undefined,
+    dispose: async () => {
+      events.push('cancel-limiter');
+      cancelLimiter?.();
+      events.push('drain-limiter');
+    },
+  }) as never;
+  options.createService = () => ({
+    async dispose() {
+      events.push('dispose-service-start');
+      await limiterCancelled;
+      events.push('dispose-service-end');
+    },
+  }) as never;
+  const runtime = await startMarketRuntime(config, options);
 
   assert.equal(runtime.paths.database, 'D:\\market\\storages\\dsh-market-intelligence\\market.sqlite');
-  assert.deepEqual(events, ['safe:D:\\market', 'safe:D:\\market\\storages\\dsh-market-intelligence', 'mkdir', 'load-state', 'open-db', 'providers', 'scheduler', 'service']);
+  assert.deepEqual(events, ['safe:D:\\market', 'safe:D:\\market\\storages\\dsh-market-intelligence', 'mkdir', 'load-state', 'open-db', 'providers', 'scheduler']);
 
-  await runtime.dispose();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      runtime.dispose().then(() => 'settled'),
+      new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), 25); }),
+    ]);
+    assert.equal(result, 'settled');
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    cancelLimiter?.();
+    await runtime.dispose();
+  }
   await runtime.dispose();
   assert.deepEqual(events, [
     'safe:D:\\market',
@@ -31,9 +60,10 @@ test('starts shared runtime once and releases service before its request limiter
     'open-db',
     'providers',
     'scheduler',
-    'service',
-    'dispose-service',
+    'cancel-limiter',
     'drain-limiter',
+    'dispose-service-start',
+    'dispose-service-end',
   ]);
 });
 
@@ -47,10 +77,47 @@ test('rolls back acquired resources when runtime startup fails', async () => {
     const expected: Record<typeof stage, string[]> = {
       openRepository: [],
       createRequestLimiter: ['close-db'],
-      createService: ['close-db', 'drain-limiter'],
+      createService: ['drain-limiter', 'close-db'],
     };
     assert.deepEqual(events.filter((event) => ['close-db', 'dispose-service', 'drain-limiter'].includes(event)), expected[stage], stage);
   }
+});
+
+test('aggregates service and limiter disposal rejections after attempting both cleanups', async () => {
+  const events: string[] = [];
+  const options = fixtureOptions(events);
+  options.createRequestLimiter = () => ({
+    run: async () => undefined,
+    async dispose() {
+      events.push('drain-limiter');
+      throw new Error('limiter cleanup failed');
+    },
+  }) as never;
+  options.createService = () => ({
+    async dispose() {
+      events.push('dispose-service');
+      throw new Error('service cleanup failed');
+    },
+  }) as never;
+  const runtime = await startMarketRuntime(config, options);
+
+  await assert.rejects(runtime.dispose(), (error: unknown) => {
+    assert.equal(error instanceof AggregateError, true);
+    assert.deepEqual((error as AggregateError).errors.map((item) => (item as Error).message), [
+      'service cleanup failed',
+      'limiter cleanup failed',
+    ]);
+    return true;
+  });
+  await assert.rejects(runtime.dispose(), (error: unknown) => {
+    assert.equal(error instanceof AggregateError, true);
+    assert.deepEqual((error as AggregateError).errors.map((item) => (item as Error).message), [
+      'service cleanup failed',
+      'limiter cleanup failed',
+    ]);
+    return true;
+  });
+  assert.deepEqual(events.slice(-2), ['drain-limiter', 'dispose-service']);
 });
 
 test('combines startup and rollback failures without losing the startup error', async () => {

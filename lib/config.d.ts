@@ -18,6 +18,18 @@ export type RuntimePaths = {
     database: string;
     config: string;
 };
+export type MarketRuntimeConfig = {
+    storageDir?: string;
+    requestTimeoutMs: number;
+    providerBatchSize: number;
+    providerConcurrency: number;
+    quoteIntervalMs: number;
+    sectorIntervalMs: number;
+    sectorPersistIntervalMs: number;
+    minuteRetentionTradingDays: number;
+    storageSoftLimitBytes: number;
+    watchlistLimit: 100;
+};
 export type WatchlistMutation = (watchlist: string[]) => string[] | void;
 export declare function resolveRuntimePaths(dshHome: string, storageDir?: string): RuntimePaths;
 export declare function loadUserState(paths: RuntimePaths): Promise<UserState>;
