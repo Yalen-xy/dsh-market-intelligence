@@ -168,7 +168,7 @@ jobs:
               throw 'Release contains duplicate asset names; failing closed'
             }
             $actualNames = @($assets | ForEach-Object { [string]$_.name } | Sort-Object -CaseSensitive)
-            if ((Compare-Object $expectedNames $actualNames -CaseSensitive).Count -ne 0) {
+            if (@(Compare-Object $expectedNames $actualNames -CaseSensitive).Count -ne 0) {
               throw 'Release asset names differ from the exact five-file allowlist; failing closed'
             }
           }
