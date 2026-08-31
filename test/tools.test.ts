@@ -410,6 +410,30 @@ test('canonical contracts and DSH preserve normalized requests and AbortSignal i
   }
 });
 
+test('all seven canonical contracts return the same projected values as DSH', async (t) => {
+  const direct = serviceFixture();
+  const registry = serviceFixture();
+  const contracts = new Map(createMarketToolContracts(direct.service, paths).map((contract) => [contract.name, contract]));
+  const harness = await toolHarness(registry);
+  t.after(async () => { await harness.ctx.fiber.dispose(); });
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ['market_status', {}],
+    ['market_quotes', { symbols: ['600000'] }],
+    ['market_series', { symbol: 'HK700', interval: 'minute' }],
+    ['market_sectors', {}],
+    ['market_auction', { market: 'HK', symbols: ['700.HK'] }],
+    ['market_watchlist', { action: 'get' }],
+    ['market_data_health', {}],
+  ];
+  for (const [name, args] of cases) {
+    const signal = new AbortController().signal;
+    const directValue = await contracts.get(name)!.execute(args, { signal });
+    const registryResult = await execute(harness.ctx, name, args, signal);
+    assert.equal(registryResult.isError, false, textOf(registryResult));
+    if (!registryResult.isError) assert.deepEqual(directValue, registryResult.value, name);
+  }
+});
+
 test('status and health backend failures remain service failures through both adapters', async (t) => {
   const direct = serviceFixture();
   const registry = serviceFixture();
@@ -449,9 +473,13 @@ test('shared output errors preserve DSH paths for later collection items', async
   const direct = serviceFixture({ quotes: invalidQuotes });
   const registry = serviceFixture({ quotes: invalidQuotes });
   const contracts = new Map(createMarketToolContracts(direct.service, paths).map((contract) => [contract.name, contract]));
+  const expected = [
+    '"items[0].price" must match exactly one oneOf branch (matched 0)',
+    '"conflicts[1].observations[0].value" must match exactly one oneOf branch (matched 0)',
+  ];
   await assert.rejects(() => contracts.get('market_quotes')!.execute({ symbols: ['sh600000'] }, { signal: new AbortController().signal }), (error: unknown) => {
     assert.equal(error instanceof MarketToolOutputError, true);
-    if (error instanceof MarketToolOutputError) assert.deepEqual(error.issues, ['"items[0].price" must be a finite JSON number']);
+    if (error instanceof MarketToolOutputError) assert.deepEqual(error.issues, expected);
     return true;
   });
   const harness = await toolHarness(registry);
@@ -459,7 +487,7 @@ test('shared output errors preserve DSH paths for later collection items', async
     const definition = harness.ctx.tools.get('market_quotes')!;
     await assert.rejects(() => definition.execute({ symbols: ['sh600000'] }, { signal: new AbortController().signal } as never), (error: unknown) => {
       assert.equal(error instanceof ToolOutputError, true);
-      if (error instanceof ToolOutputError) assert.deepEqual(error.violations, ['"items[0].price" must be a finite JSON number']);
+      if (error instanceof ToolOutputError) assert.deepEqual(error.violations, expected);
       return true;
     });
   } finally {
@@ -488,6 +516,29 @@ test('shared conflict projection reports the later conflict index exactly', asyn
   try {
     const definition = harness.ctx.tools.get('market_quotes')!;
     await assert.rejects(() => definition.execute({ symbols: ['sh600000'] }, { signal: new AbortController().signal } as never), (error: unknown) => {
+      assert.equal(error instanceof ToolOutputError, true);
+      if (error instanceof ToolOutputError) assert.deepEqual(error.violations, expected);
+      return true;
+    });
+  } finally {
+    await harness.ctx.fiber.dispose();
+  }
+});
+
+test('direct contracts reject schema-invalid nullable quote fields with DSH oneOf diagnostics', async () => {
+  const invalidQuotes = { ...quotesResult, items: [{ ...quote, open: 'oops' }] };
+  const direct = serviceFixture({ quotes: invalidQuotes });
+  const registry = serviceFixture({ quotes: invalidQuotes });
+  const contracts = new Map(createMarketToolContracts(direct.service, paths).map((contract) => [contract.name, contract]));
+  const expected = ['"items[0].open" must match exactly one oneOf branch (matched 0)'];
+  await assert.rejects(() => contracts.get('market_quotes')!.execute({ symbols: ['sh600000'] }, { signal: new AbortController().signal }), (error: unknown) => {
+    assert.equal(error instanceof MarketToolOutputError, true);
+    if (error instanceof MarketToolOutputError) assert.deepEqual(error.issues, expected);
+    return true;
+  });
+  const harness = await toolHarness(registry);
+  try {
+    await assert.rejects(() => harness.ctx.tools.get('market_quotes')!.execute({ symbols: ['sh600000'] }, { signal: new AbortController().signal } as never), (error: unknown) => {
       assert.equal(error instanceof ToolOutputError, true);
       if (error instanceof ToolOutputError) assert.deepEqual(error.violations, expected);
       return true;

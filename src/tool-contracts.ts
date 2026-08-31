@@ -390,14 +390,14 @@ export function createMarketToolContracts(service: MarketToolsService, _paths: T
   return [
     contract('market_status', 'Use this tool before answering questions about whether today/current A-share or Hong Kong markets are open, closed, in auction, or being collected. Returns exchange session state, not prices.', statusParameters, OUTPUT_SCHEMAS.market_status, async (args) => {
       const result = service.status(args as { market?: 'CN' | 'HK' });
-      return projectToolOutput('market_status', () => projectStatus(result));
+      return projectToolOutput('market_status', OUTPUT_SCHEMAS.market_status, () => projectStatus(result));
     }),
     contract('market_quotes', 'Use this tool whenever the user asks about today/current/latest A-share or Hong Kong prices, indices, or market performance. For a broad market overview pass symbols ["sh000001","sz399001","sh000300","hkHSI","hkHSTECH"] and refresh true; it works both during trading and after close. Never claim market data is unavailable before calling this tool.', quotesParameters, OUTPUT_SCHEMAS.market_quotes, async (args, context) => {
       const input = args as { symbols?: string[]; refresh?: boolean };
       requireAtMost100(input.symbols, 'symbols');
       const request = input.symbols === undefined ? { ...input, refresh: input.refresh ?? true } : { ...input, refresh: input.refresh ?? true, symbols: canonicalInputSymbols(input.symbols, 'symbols').map(({ symbol }) => symbol) };
       const result = await service.quotes(request, context.signal);
-      return projectToolOutput('market_quotes', () => projectQuotes(result));
+      return projectToolOutput('market_quotes', OUTPUT_SCHEMAS.market_quotes, () => projectQuotes(result));
     }),
     contract('market_series', 'Read minute, daily, weekly, or monthly bars for one supported symbol.', seriesParameters, OUTPUT_SCHEMAS.market_series, async (args, context) => {
       const input = args as { symbol: string; interval: 'minute' | 'day' | 'week' | 'month'; refresh?: boolean; start?: string; end?: string; adjustment?: 'qfq'; limit?: number };
@@ -405,13 +405,13 @@ export function createMarketToolContracts(service: MarketToolsService, _paths: T
       const request = { ...input, symbol: canonicalInputSymbol(input.symbol, 'symbol').symbol };
       validateSeriesRange(request.start, request.end);
       const result = await service.series(request, context.signal);
-      return projectToolOutput('market_series', () => projectSeries(result, input.limit ?? 500));
+      return projectToolOutput('market_series', OUTPUT_SCHEMAS.market_series, () => projectSeries(result, input.limit ?? 500));
     }),
     contract('market_sectors', 'Use this tool for today/current A-share industry or concept sector rankings, leaders, turnover, and breadth analysis. Read both categories when the user asks for a broad盘面/板块 overview.', sectorsParameters, OUTPUT_SCHEMAS.market_sectors, async (args, context) => {
       const input = args as { category?: string; sort?: 'changePercent' | 'turnover' | 'netFlow'; direction?: 'asc' | 'desc'; limit?: number; refresh?: boolean };
       requireLimit(input.limit);
       const result = await service.sectors({ ...input, refresh: input.refresh ?? true }, context.signal);
-      return projectToolOutput('market_sectors', () => projectSectors(result, input.limit ?? 500));
+      return projectToolOutput('market_sectors', OUTPUT_SCHEMAS.market_sectors, () => projectSectors(result, input.limit ?? 500));
     }),
     contract('market_auction', 'Read A-share call-auction or Hong Kong pre-open observations.', auctionParameters, OUTPUT_SCHEMAS.market_auction, async (args, context) => {
       const input = args as { market: 'CN' | 'HK'; symbols?: string[] };
@@ -421,7 +421,7 @@ export function createMarketToolContracts(service: MarketToolsService, _paths: T
         return canonical.symbol;
       }) };
       const result = await service.auction(request, context.signal);
-      return projectToolOutput('market_auction', () => projectAuction(result));
+      return projectToolOutput('market_auction', OUTPUT_SCHEMAS.market_auction, () => projectAuction(result));
     }),
     contract('market_watchlist', 'Get, add, or remove one A-share or Hong Kong symbol in the local watchlist.', watchlistParameters, OUTPUT_SCHEMAS.market_watchlist, async (args, context) => {
       const input = args as { action: 'get' | 'add' | 'remove'; symbol?: string };
@@ -429,11 +429,11 @@ export function createMarketToolContracts(service: MarketToolsService, _paths: T
       if (input.action !== 'get' && input.symbol === undefined) throw new MarketToolArgsError(['"symbol" is required when action is "add" or "remove"']);
       const request = input.action === 'get' ? { action: 'get' as const } : { action: input.action, symbol: canonicalInputSymbol(input.symbol!, 'symbol').symbol };
       const result = await service.watchlist(request, context.signal);
-      return projectToolOutput('market_watchlist', () => projectWatchlist(result));
+      return projectToolOutput('market_watchlist', OUTPUT_SCHEMAS.market_watchlist, () => projectWatchlist(result));
     }),
     contract('market_data_health', 'Use this tool to diagnose market data availability or provider failures. Do not infer that行情 is unavailable from shell/network limitations before checking this tool.', healthParameters, OUTPUT_SCHEMAS.market_data_health, async () => {
       const result = service.health();
-      return projectToolOutput('market_data_health', () => projectHealth(result));
+      return projectToolOutput('market_data_health', OUTPUT_SCHEMAS.market_data_health, () => projectHealth(result));
     }),
   ];
 }
@@ -522,10 +522,11 @@ function daysInMonth(year: number, month: number): number {
   return [4, 6, 9, 11].includes(month) ? 30 : 31;
 }
 
-async function projectToolOutput<T>(tool: MarketToolName, project: () => T | Promise<T>): Promise<T> {
+async function projectToolOutput<T>(tool: MarketToolName, schema: JsonSchemaObject, project: () => T | Promise<T>): Promise<T> {
   try {
     const value = await project();
-    assertLosslessJson(value);
+    const violations = validateJsonSchemaValue(schema, value, '');
+    if (violations.length > 0) throw new MarketToolOutputError(violations);
     return value;
   } catch (error) {
     if (error instanceof MarketToolOutputError) throw error;
@@ -533,25 +534,66 @@ async function projectToolOutput<T>(tool: MarketToolName, project: () => T | Pro
   }
 }
 
-function assertLosslessJson(value: unknown, ancestors = new Set<object>()): void {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
-  if (typeof value === 'number') {
-    if (Number.isFinite(value) && !Object.is(value, -0)) return;
-    throw new Error('invalid JSON number');
-  }
-  if (typeof value !== 'object' || ancestors.has(value)) throw new Error('invalid JSON value');
-  const prototype = Object.getPrototypeOf(value);
-  if (Array.isArray(value)) {
-    if (prototype !== Array.prototype || Object.keys(value).length !== value.length) throw new Error('invalid JSON array');
-  } else if (prototype !== Object.prototype && prototype !== null) {
-    throw new Error('invalid JSON object');
-  }
-  ancestors.add(value);
+type JsonSchemaNode = Readonly<Record<string, unknown>>;
+
+function validateJsonSchemaValue(schema: JsonSchemaNode, value: unknown, path: string): string[] {
   try {
-    for (const item of Array.isArray(value) ? value : Object.values(value)) assertLosslessJson(item, ancestors);
-  } finally {
-    ancestors.delete(value);
+    const oneOf = schema.oneOf;
+    if (Array.isArray(oneOf)) {
+      const matches = oneOf.filter((branch) => validateJsonSchemaValue(branch as JsonSchemaNode, value, path).length === 0).length;
+      return matches === 1 ? [] : [`"${diagnosticPath(path)}" must match exactly one oneOf branch (matched ${matches})`];
+    }
+    switch (schema.type) {
+      case 'object': return validateObject(schema, value, path);
+      case 'array': return validateArray(schema, value, path);
+      case 'string': return typeof value === 'string' ? scalarViolations(schema, value, path) : [`"${diagnosticPath(path)}" must be a string`];
+      case 'number': return typeof value !== 'number' ? [`"${diagnosticPath(path)}" must be a number`] : !isJsonNumber(value) ? [`"${diagnosticPath(path)}" must be a finite JSON number`] : scalarViolations(schema, value, path);
+      case 'integer': return !isJsonNumber(value) || !Number.isInteger(value) ? [`"${diagnosticPath(path)}" must be an integer`] : scalarViolations(schema, value, path);
+      case 'boolean': return typeof value === 'boolean' ? scalarViolations(schema, value, path) : [`"${diagnosticPath(path)}" must be a boolean`];
+      case 'null': return value === null ? scalarViolations(schema, value, path) : [`"${diagnosticPath(path)}" must be null`];
+      default: return isLosslessJson(value) ? [] : [`"${diagnosticPath(path)}" must be a lossless JSON value`];
+    }
+  } catch {
+    return [`"${diagnosticPath(path)}" must be a lossless JSON value`];
   }
+}
+
+function validateObject(schema: JsonSchemaNode, value: unknown, path: string): string[] {
+  if (!isPlainRecord(value)) return [`"${diagnosticPath(path)}" must be an object`];
+  const properties = (schema.properties ?? {}) as Record<string, JsonSchemaNode>;
+  const required = (schema.required ?? []) as string[];
+  const violations: string[] = [];
+  for (const key of required) if (!Object.hasOwn(value, key) || value[key] === undefined) violations.push(`missing required property "${propertyPath(path, key)}"`);
+  for (const [key, child] of Object.entries(properties)) if (Object.hasOwn(value, key) && value[key] !== undefined) violations.push(...validateJsonSchemaValue(child, value[key], propertyPath(path, key)));
+  if (schema.additionalProperties === false) for (const key of Object.keys(value)) if (!Object.hasOwn(properties, key)) violations.push(`"${propertyPath(path, key)}" is not a declared property (additionalProperties: false)`);
+  return violations.length > 0 ? violations : isLosslessJson(value) ? [] : [`"${diagnosticPath(path)}" must be a lossless JSON object`];
+}
+
+function validateArray(schema: JsonSchemaNode, value: unknown, path: string): string[] {
+  if (!Array.isArray(value)) return [`"${diagnosticPath(path)}" must be an array`];
+  const itemSchema = schema.items as JsonSchemaNode | undefined;
+  const violations = itemSchema === undefined ? [] : value.flatMap((entry, index) => validateJsonSchemaValue(itemSchema, entry, `${path}[${index}]`));
+  return violations.length > 0 ? violations : isLosslessJson(value) ? [] : [`"${diagnosticPath(path)}" must be a dense lossless JSON array`];
+}
+
+function scalarViolations(schema: JsonSchemaNode, value: string | number | boolean | null, path: string): string[] {
+  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) return [`"${diagnosticPath(path)}" must be one of ${JSON.stringify(schema.enum)}`];
+  if (Object.hasOwn(schema, 'const') && schema.const !== value) return [`"${diagnosticPath(path)}" must be ${JSON.stringify(schema.const)}`];
+  return [];
+}
+
+function diagnosticPath(path: string): string { return path === '' ? 'arguments' : path; }
+function propertyPath(path: string, key: string): string { return path === '' ? key : `${path}.${key}`; }
+function isJsonNumber(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value) && !Object.is(value, -0); }
+function isLosslessJson(value: unknown, seen = new Set<object>()): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (isJsonNumber(value)) return true;
+  if (typeof value !== 'object' || value === null || seen.has(value)) return false;
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype || Reflect.ownKeys(value).length !== value.length + 1) return false;
+  } else if (!isPlainRecord(value)) return false;
+  seen.add(value);
+  try { return Object.values(value).every((entry) => isLosslessJson(entry, seen)); } catch { return false; } finally { seen.delete(value); }
 }
 
 function toJsonSchema(spec: Record<string, unknown>): JsonSchemaObject {
@@ -647,7 +689,7 @@ function projectQuote(value: CanonicalQuote, path: string): CanonicalQuote {
     name: value.name,
     market: value.market,
     currency: value.currency,
-    price: projectNullableNumber(value.price, `${path}.price`),
+    price: value.price,
     open: value.open,
     high: value.high,
     low: value.low,
@@ -664,22 +706,12 @@ function projectQuote(value: CanonicalQuote, path: string): CanonicalQuote {
   };
 }
 
-function projectNullableNumber(value: unknown, path: string): number | null {
-  if (value === null) return null;
-  if (typeof value === 'number' && Number.isFinite(value) && !Object.is(value, -0)) return value;
-  throw new MarketToolOutputError([`"${path}" must be a finite JSON number`]);
-}
-
 function projectConflict(value: SourceConflict, conflictIndex: number): SourceConflict {
   const observations = value.observations.map((observation, index) => {
-    const observed = observation.value;
-    if (typeof observed !== 'number' && typeof observed !== 'string' && observed !== null) {
-      throw new MarketToolOutputError([`"conflicts[${conflictIndex}].observations[${index}].value" must match exactly one oneOf branch (matched 0)`]);
-    }
     return {
       source: observation.source,
       marketTime: observation.marketTime,
-      value: observed,
+      value: observation.value,
     };
   });
   return {

@@ -55,3 +55,19 @@
 
 - Direct and DSH definitions now both preserve `status backend unavailable` and `health backend unavailable` as non-output failures.
 - Direct and DSH quote failures both report `"items[0].price" must be a finite JSON number`; a second conflict reports `"conflicts[1].observations[0].value" must match exactly one oneOf branch (matched 0)`.
+
+## Fix round 2
+
+### Changes
+
+- Added a host-neutral JSON Schema value validator for the complete published output-schema subset: closed objects, required properties, arrays, scalars, enums, exact-one `oneOf`, finite JSON numbers, dense arrays, lossless JSON, and path-qualified diagnostics.
+- Shared contracts now validate projected output against their canonical output schema before returning. DSH retains its independent output validation at the adapter edge.
+- Removed the one-off quote-price rule so every nullable number follows the schema's exact-one `oneOf` behavior, including strings, `NaN`, and `-0`.
+- Added table-driven direct/DSH parity coverage for all seven successful outputs, normalized requests/defaults, and cancellable-tool signal forwarding; added exact direct/DSH output-diagnostic checks for lossless-but-schema-invalid nullable quote values and later conflict entries.
+
+### RED/GREEN evidence
+
+- RED: `node --import tsx --test test/tools.test.ts` failed at `direct contracts reject schema-invalid nullable quote fields with DSH oneOf diagnostics` with `Missing expected rejection`, proving direct contracts had not yet validated the output schema.
+- GREEN: `npm run build` passed.
+- GREEN: `node --import tsx --test test/tool-contracts.test.ts test/tools.test.ts test/type-surface.test.ts` passed: 27 tests, 27 passed, 0 failed.
+- Full regression: `npm test` exited 0: 431 tests, 431 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo; duration `122939.3508ms`.
