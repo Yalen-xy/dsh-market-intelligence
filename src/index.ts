@@ -1,24 +1,20 @@
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type Schema from '@deepseek-ai/schemastery';
-import { mkdir } from 'node:fs/promises';
-import { SharedRequestLimiter } from './http.js';
 import {
   loadUserState,
   mutateWatchlist,
-  resolveRuntimePaths,
   type RuntimePaths,
-  type UserState,
-  type WatchlistMutation,
 } from './config.js';
-import type { MarketProvider } from './providers/provider.js';
-import { SinaProvider, type SinaProviderOptions } from './providers/sina.js';
-import { TencentProvider, type TencentProviderOptions } from './providers/tencent.js';
+import { mkdir } from 'node:fs/promises';
+import { SinaProvider } from './providers/sina.js';
+import { TencentProvider } from './providers/tencent.js';
 import { MarketRepository } from './repository.js';
-import { MarketScheduler, type Clock, type MarketSchedulerOptions } from './scheduler.js';
-import { MarketService, type MarketServiceOptions, type ServiceRepository, type ServiceScheduler } from './service.js';
+import { MarketScheduler, type Clock } from './scheduler.js';
+import { MarketService } from './service.js';
 import { registerMarketTools, type MarketToolsService } from './tools.js';
 import { assertSafeLocalWindowsPath, requireLocalWindowsPath } from './paths.js';
+import { createSharedRequestLimiter, startMarketRuntime, type MarketRuntimeConfig, type MarketRuntimeOptions } from './runtime.js';
 
 export const name = 'market-intelligence';
 export const inject = ['tools'];
@@ -51,7 +47,7 @@ export type Config = {
   watchlistLimit?: 100;
 };
 
-type RuntimeConfig = Required<Omit<Config, 'storageDir'>> & Pick<Config, 'storageDir'>;
+type RuntimeConfig = MarketRuntimeConfig;
 
 const ConfigShape = z.object({
   storageDir: z.string(),
@@ -72,23 +68,9 @@ export const Config: Schema<unknown, RuntimeConfig> = z.transform(
   true,
 ) as Schema<unknown, RuntimeConfig>;
 
-type SinaMarketProvider = Pick<MarketProvider, 'quotes'> & {
-  sectors(signal: AbortSignal): ReturnType<SinaProvider['sectors']>;
-};
-
-export type PluginDependencies = {
+export type PluginDependencies = Omit<MarketRuntimeOptions, 'baseDirectory'> & {
   getDshHome(): string | undefined;
-  assertSafePath(pathValue: string): Promise<void>;
-  mkdir(directory: string, options: { recursive: true }): Promise<unknown>;
-  loadUserState(paths: RuntimePaths): Promise<UserState>;
-  mutateWatchlist(paths: RuntimePaths, mutation: WatchlistMutation): Promise<UserState>;
-  openRepository(databasePath: string): ServiceRepository;
-  createTencent(options: TencentProviderOptions): MarketProvider;
-  createSina(options: SinaProviderOptions): SinaMarketProvider;
-  createScheduler(options: MarketSchedulerOptions): ServiceScheduler;
-  createService(options: MarketServiceOptions): MarketService;
   registerTools(ctx: Context, service: MarketToolsService, paths: RuntimePaths): () => void;
-  clock: Clock;
 };
 
 const systemClock: Clock = {
@@ -104,6 +86,7 @@ const defaultDependencies: PluginDependencies = {
   loadUserState,
   mutateWatchlist,
   openRepository: (databasePath) => MarketRepository.open(databasePath),
+  createRequestLimiter: createSharedRequestLimiter,
   createTencent: (options) => new TencentProvider(options),
   createSina: (options) => new SinaProvider(options),
   createScheduler: (options) => new MarketScheduler(options),
@@ -117,11 +100,8 @@ export function createApply(overrides: Partial<PluginDependencies> = {}) {
   return async function applyWithDependencies(ctx: Context, rawConfig: Config): Promise<() => Promise<void>> {
     const config = Config(rawConfig);
     const dshHome = requireDshHome(dependencies.getDshHome());
-    const paths = resolveRuntimePaths(dshHome, config.storageDir);
-    await dependencies.assertSafePath(dshHome);
-    await dependencies.assertSafePath(paths.root);
     return ctx.effect(
-      async () => startLifecycle(ctx, config, paths, dependencies),
+      async () => startLifecycle(ctx, config, dshHome, dependencies),
       'market-intelligence lifecycle',
     );
   };
@@ -136,103 +116,41 @@ export async function apply(ctx: Context, config: Config): Promise<() => Promise
 async function startLifecycle(
   ctx: Context,
   config: RuntimeConfig,
-  paths: RuntimePaths,
+  dshHome: string,
   dependencies: PluginDependencies,
 ): Promise<() => Promise<void>> {
-  let repository: ServiceRepository | undefined;
-  let service: MarketService | undefined;
+  const { getDshHome: _getDshHome, registerTools, ...runtimeOptions } = dependencies;
+  const runtime = await startMarketRuntime(config, { ...runtimeOptions, baseDirectory: dshHome });
   let unregisterTools: (() => void) | undefined;
-  let requestLimiter: SharedRequestLimiter | undefined;
-  let disposed = false;
-
-  const dispose = async (): Promise<void> => {
-    if (disposed) return;
-    disposed = true;
-    const errors: unknown[] = [];
-    if (unregisterTools) {
-      try {
-        unregisterTools();
-      } catch (error) {
-        errors.push(error);
-      }
-    }
-    let limiterDrain: Promise<void> | undefined;
-    if (requestLimiter) {
-      try {
-        limiterDrain = requestLimiter.dispose();
-      } catch (error) {
-        errors.push(error);
-      }
-    }
-    if (service) {
-      try {
-        await service.dispose();
-      } catch (error) {
-        errors.push(error);
-      }
-    } else if (repository) {
-      try {
-        repository.close();
-      } catch (error) {
-        errors.push(error);
-      }
-    }
-    if (limiterDrain) {
-      try {
-        await limiterDrain;
-      } catch (error) {
-        errors.push(error);
-      }
-    }
-    throwCleanupErrors(errors);
-  };
-
   try {
-    await dependencies.mkdir(paths.root, { recursive: true });
-    const initialState = await dependencies.loadUserState(paths);
-    repository = dependencies.openRepository(paths.database);
-    requestLimiter = new SharedRequestLimiter(config.providerConcurrency);
-    const now = () => dependencies.clock.now().getTime();
-    const tencent = dependencies.createTencent({
-      now,
-      requestTimeoutMs: config.requestTimeoutMs,
-      quoteConcurrency: config.providerConcurrency,
-      requestLimiter,
-    });
-    const sina = dependencies.createSina({ now, requestTimeoutMs: config.requestTimeoutMs, requestLimiter });
-    const scheduler = dependencies.createScheduler({
-      clock: dependencies.clock,
-      closures: initialState.closures,
-      quoteIntervalMs: config.quoteIntervalMs,
-      sectorIntervalMs: config.sectorIntervalMs,
-      sectorPersistIntervalMs: config.sectorPersistIntervalMs,
-    });
-    service = dependencies.createService({
-      clock: dependencies.clock,
-      tencent,
-      sina,
-      repository,
-      scheduler,
-      stateStore: {
-        mutateWatchlist: (mutation) => dependencies.mutateWatchlist(paths, mutation),
-      },
-      initialState,
-      config: {
-        providerBatchSize: config.providerBatchSize,
-        minuteRetentionTradingDays: config.minuteRetentionTradingDays,
-        storageSoftLimitBytes: config.storageSoftLimitBytes,
-      },
-    });
-    unregisterTools = dependencies.registerTools(ctx, service, paths);
-    return dispose;
-  } catch (startupError) {
+    unregisterTools = registerTools(ctx, runtime.service, runtime.paths);
+  } catch (registrationError) {
     try {
-      await dispose();
+      await runtime.dispose();
     } catch (cleanupError) {
-      throw new AggregateError([startupError, ...cleanupErrors(cleanupError)], 'market-intelligence startup and rollback failed');
+      throw new AggregateError([registrationError, ...cleanupErrors(cleanupError)], 'market-intelligence tool registration and rollback failed');
     }
-    throw startupError;
+    throw registrationError;
   }
+  let disposal: Promise<void> | undefined;
+  return () => {
+    if (disposal) return disposal;
+    disposal = (async () => {
+      const errors: unknown[] = [];
+      try {
+        unregisterTools?.();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        await runtime.dispose();
+      } catch (error) {
+        errors.push(error);
+      }
+      throwCleanupErrors(errors);
+    })();
+    return disposal;
+  };
 }
 
 function validateConfig(value: Record<string, unknown>): RuntimeConfig {

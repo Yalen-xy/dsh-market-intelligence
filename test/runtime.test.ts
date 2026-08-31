@@ -1,0 +1,108 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { startMarketRuntime, type MarketRuntimeConfig, type MarketRuntimeOptions } from '../src/runtime.ts';
+
+const config: MarketRuntimeConfig = {
+  requestTimeoutMs: 10_000,
+  providerBatchSize: 100,
+  providerConcurrency: 4,
+  quoteIntervalMs: 10_000,
+  sectorIntervalMs: 60_000,
+  sectorPersistIntervalMs: 300_000,
+  minuteRetentionTradingDays: 30,
+  storageSoftLimitBytes: 536_870_912,
+  watchlistLimit: 100,
+};
+
+test('starts shared runtime once and releases service before its request limiter', async () => {
+  const events: string[] = [];
+  const runtime = await startMarketRuntime(config, fixtureOptions(events));
+
+  assert.equal(runtime.paths.database, 'D:\\market\\storages\\dsh-market-intelligence\\market.sqlite');
+  assert.deepEqual(events, ['safe:D:\\market', 'safe:D:\\market\\storages\\dsh-market-intelligence', 'mkdir', 'load-state', 'open-db', 'providers', 'scheduler', 'service']);
+
+  await runtime.dispose();
+  await runtime.dispose();
+  assert.deepEqual(events, [
+    'safe:D:\\market',
+    'safe:D:\\market\\storages\\dsh-market-intelligence',
+    'mkdir',
+    'load-state',
+    'open-db',
+    'providers',
+    'scheduler',
+    'service',
+    'dispose-service',
+    'drain-limiter',
+  ]);
+});
+
+test('rolls back acquired resources when runtime startup fails', async () => {
+  for (const stage of ['openRepository', 'createRequestLimiter', 'createService'] as const) {
+    const events: string[] = [];
+    const options = fixtureOptions(events, stage);
+
+    await assert.rejects(startMarketRuntime(config, options), new RegExp(`failed at ${stage}`));
+
+    const expected: Record<typeof stage, string[]> = {
+      openRepository: [],
+      createRequestLimiter: ['close-db'],
+      createService: ['close-db', 'drain-limiter'],
+    };
+    assert.deepEqual(events.filter((event) => ['close-db', 'dispose-service', 'drain-limiter'].includes(event)), expected[stage], stage);
+  }
+});
+
+test('combines startup and rollback failures without losing the startup error', async () => {
+  const events: string[] = [];
+  const options = fixtureOptions(events, 'createService');
+  options.openRepository = () => ({
+    close() {
+      events.push('close-db');
+      throw new Error('repository close failed');
+    },
+  }) as never;
+
+  await assert.rejects(startMarketRuntime(config, options), (error: unknown) => {
+    assert.equal(error instanceof AggregateError, true);
+    assert.deepEqual((error as AggregateError).errors.map((item) => (item as Error).message), [
+      'failed at createService',
+      'repository close failed',
+    ]);
+    return true;
+  });
+});
+
+function fixtureOptions(events: string[], failingStage?: 'openRepository' | 'createRequestLimiter' | 'createService'): MarketRuntimeOptions {
+  const fail = (stage: typeof failingStage) => {
+    if (stage === failingStage) throw new Error(`failed at ${stage}`);
+  };
+  return {
+    baseDirectory: 'D:\\market',
+    assertSafePath: async (value) => { events.push(`safe:${value}`); },
+    mkdir: async () => { events.push('mkdir'); },
+    loadUserState: async () => { events.push('load-state'); return { watchlist: [], closures: {} }; },
+    mutateWatchlist: async () => ({ watchlist: [], closures: {} }),
+    openRepository: () => {
+      fail('openRepository');
+      events.push('open-db');
+      return { close() { events.push('close-db'); } } as never;
+    },
+    createRequestLimiter: () => {
+      fail('createRequestLimiter');
+      return { run: async () => undefined, dispose: async () => { events.push('drain-limiter'); } } as never;
+    },
+    createTencent: () => {
+      events.push('providers');
+      return { async quotes() { return { items: [] }; }, async series() { return { items: [] }; }, async auction() { return { phase: 'closed', items: [] }; } } as never;
+    },
+    createSina: () => ({ async quotes() { return { items: [] }; }, async sectors() { return { items: [] }; } }) as never,
+    createScheduler: () => { events.push('scheduler'); return {} as never; },
+    createService: () => {
+      fail('createService');
+      events.push('service');
+      return { async dispose() { events.push('dispose-service'); } } as never;
+    },
+    clock: { now: () => new Date('2026-08-31T00:00:00.000Z'), setTimeout, clearTimeout },
+  };
+}
