@@ -2,21 +2,21 @@
 
 [![CI](https://github.com/Yalen-xy/dsh-market-intelligence/actions/workflows/ci.yml/badge.svg)](https://github.com/Yalen-xy/dsh-market-intelligence/actions/workflows/ci.yml)
 
-给 DSH 的 A/H 股只读行情层。
+一个为 DeepSeek Harness（DSH）设计的 A/H 股只读行情插件。
 
 把盘面交给数据，把判断留给模型。插件持续获取、整理并保存 A 股、港股、主要 A 股指数、恒生指数与恒生科技指数行情，再通过一组稳定的工具交给 DSH 使用。它不接入账户，不执行交易；本项目及其输出均不构成投资建议。
 
 ## 安装
 
-[下载最新版 Windows 安装包](https://github.com/Yalen-xy/dsh-market-intelligence/releases/latest/download/dsh-market-intelligence-latest.zip)
+[下载最新版 Windows 插件安装包](https://github.com/Yalen-xy/dsh-market-intelligence/releases/latest/download/dsh-market-intelligence-latest.zip)
 
-1. 正常退出 DSH Desktop。
+1. 正常退出 DeepSeek Harness。
 2. 下载并解压 ZIP。
 3. 双击 `INSTALL.cmd`。
 4. 阅读许可提示，按安装窗口完成操作。
-5. 重新启动 DSH Desktop。
+5. 重新启动 DeepSeek Harness。
 
-安装器会寻找 DSH Desktop 当前使用的受管 Profile，校验发布文件，并在动手前留下可恢复的备份。遇到仍在运行的 DSH 进程、校验失败或无法确认的安装环境时，它会直接停下。指定数据目录、升级、卸载和恢复见[安装与恢复指南](docs/INSTALL.md)。
+安装器会寻找 DSH 当前使用的受管 Profile，校验发布文件，并在动手前留下可恢复的备份。遇到仍在运行的 DSH 进程、校验失败或无法确认的安装环境时，它会直接停下。指定数据目录、升级、卸载和恢复见[安装与恢复指南](docs/INSTALL.md)。
 
 ## 它提供什么
 
@@ -31,7 +31,7 @@
 
 ## 工作原理
 
-插件运行在 DSH Desktop 进程内。调度器按中国内地和香港市场阶段控制采集频率；适配器从固定、经过审查的腾讯和新浪公开端点读取行情；规范化层统一证券代码、时间与缺失值；SQLite 保存行情和数据源健康记录。交给 DSH 之前，每份数据都会经过状态与时效检查。
+插件运行在 DeepSeek Harness 进程内。调度器按中国内地和香港市场阶段控制采集频率；适配器从固定、经过审查的腾讯和新浪公开端点读取行情；规范化层统一证券代码、时间与缺失值；SQLite 保存行情和数据源健康记录。交给 DSH 之前，每份数据都会经过状态与时效检查。
 
 数据流、模块边界、存储约束和故障恢复设计都在[架构说明](docs/ARCHITECTURE.md)里。
 
@@ -41,7 +41,7 @@
 
 ## 环境
 
-- Windows 版 DSH Desktop，以及可用的受管 Desktop Profile。
+- Windows 版 DeepSeek Harness，以及可用的受管 Profile。
 - Windows PowerShell 5.1 或 PowerShell 7。
 - Node.js `^22.19.0 || >=24.0.0`。
 
