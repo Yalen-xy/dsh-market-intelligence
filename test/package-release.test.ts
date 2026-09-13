@@ -85,6 +85,9 @@ test('Claude documentation describes the Windows extension boundary without publ
   assert.match(claudeGuide, /(?:无需|不需要)手动(?:执行)?\s*npm|no manual npm/i);
   assert.match(claudeGuide, /(?:无需|不需要)手动.*JSON|no manual JSON/i);
   assert.match(claudeGuide, /Claude Desktop supplies the extension runtime; normal installation needs no dependency management/i);
+  assert.match(claudeGuide, /%LOCALAPPDATA%\\dsh-market-intelligence\\claude\\storages\\dsh-market-intelligence/i);
+  assert.match(claudeGuide, /claude-market\.sqlite/);
+  assert.match(claudeGuide, /claude-config\.json/);
   assert.doesNotMatch(claudeGuide, /Node\.js|system Node|安装.*Node/i);
   assert.match(releaseWorkflow, /Claude Desktop supplies the extension runtime; normal Claude installation needs no dependency management/i);
   assert.doesNotMatch(releaseWorkflow, /Claude Desktop[^\r\n]*Node\.js/i);
@@ -112,7 +115,7 @@ test('Claude documentation describes the Windows extension boundary without publ
   for (const content of [claudeGuide, architecture]) {
     assert.doesNotMatch(content, /DSH Desktop/i);
     assert.doesNotMatch(content, /D:\\AI/i);
-    assert.doesNotMatch(content, /claude_desktop_config\.json|%APPDATA%|%LOCALAPPDATA%/i);
+    assert.doesNotMatch(content, /claude_desktop_config\.json|%APPDATA%/i);
     assert.doesNotMatch(content, /\.map\b|source map/i);
     assert.doesNotMatch(content, /(?:ghp_|github_pat_)[A-Za-z0-9_]+|Authorization:\s*Bearer|password\s*[:=]\s*[^<\s]/i);
     assert.doesNotMatch(content, /(?:endorsed by|authorized by|affiliated with)\s+(?:Anthropic|Tencent|Sina|DeepSeek)/i);
