@@ -1,6 +1,8 @@
 import {
   MARKET_RUNTIME_DEFAULTS,
   MARKET_RUNTIME_INTEGER_LIMITS,
+  resolveRuntimePaths,
+  type RuntimePaths,
 } from '../src/config.js';
 import { requireLocalWindowsPath } from '../src/paths.js';
 import path from 'node:path';
@@ -14,6 +16,8 @@ export type ClaudeRuntimeConfig = {
 
 const CLAUDE_STORAGE_DIRECTORY = 'claude';
 const CLAUDE_APPLICATION_DIRECTORY = 'dsh-market-intelligence';
+const CLAUDE_DATABASE_FILE = 'claude-market.sqlite';
+const CLAUDE_CONFIG_FILE = 'claude-config.json';
 const DECIMAL_INTEGER = /^[1-9]\d*$/;
 
 export function resolveClaudeBaseDirectory(environment: NodeJS.ProcessEnv): string {
@@ -26,6 +30,15 @@ export function resolveClaudeBaseDirectory(environment: NodeJS.ProcessEnv): stri
     CLAUDE_APPLICATION_DIRECTORY,
     CLAUDE_STORAGE_DIRECTORY,
   );
+}
+
+export function resolveClaudeRuntimePaths(baseDirectory: string, storageDir?: string): RuntimePaths {
+  const paths = resolveRuntimePaths(baseDirectory, storageDir);
+  return {
+    ...paths,
+    database: path.win32.join(paths.root, CLAUDE_DATABASE_FILE),
+    config: path.win32.join(paths.root, CLAUDE_CONFIG_FILE),
+  };
 }
 
 export function readClaudeConfig(environment: NodeJS.ProcessEnv): ClaudeRuntimeConfig {

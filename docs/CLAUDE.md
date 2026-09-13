@@ -13,7 +13,7 @@
 
 ## 存储与配置
 
-默认情况下，扩展在 Windows 的 Claude 专用应用数据位置保存自身的数据库、观察列表、日志、收盘配置和有界恢复状态。Claude 与 DSH 的数据库和运行状态相互独立：不会自动导入、迁移或同步观察列表和行情数据。
+默认情况下，扩展在 `%LOCALAPPDATA%\dsh-market-intelligence\claude\storages\dsh-market-intelligence` 保存自身的数据库、观察列表、日志、收盘配置和有界恢复状态。其配置根内固定使用 `claude-market.sqlite` 和 `claude-config.json`；即使自定义 storage directory 恰好也包含 DSH 的 `market.sqlite` 或 `config.json`，Claude 也不会读取、打开、迁移或修改那些 DSH 文件。Claude 与 DSH 的数据库和运行状态相互独立：不会自动导入、迁移或同步观察列表和行情数据。
 
 如需把 Claude 数据放到本地 D 盘，请在扩展设置中为 storage directory 选择绝对本地路径，例如 `D:\MarketData\ClaudeMarketIntelligence`。不要选择网络共享、可移动介质、相对路径或含重解析点的路径；不安全的路径会使扩展停止启动。请求超时、行情轮询和板块轮询可在同一设置页内调整，未配置时使用受限默认值。
 

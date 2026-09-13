@@ -15,6 +15,7 @@ type SinaMarketProvider = Pick<MarketProvider, 'quotes'> & {
 type DisposableLimiter = RequestLimiter & { dispose(): Promise<void> };
 type DisposableService = MarketToolsService & { dispose(): Promise<void> };
 type CleanupOutcome = { failed: false } | { failed: true; error: unknown };
+export type RuntimePathResolver = (baseDirectory: string, storageDir?: string) => RuntimePaths;
 
 export type MarketRuntime = {
   service: MarketToolsService;
@@ -24,6 +25,7 @@ export type MarketRuntime = {
 
 export type MarketRuntimeOptions = {
   baseDirectory: string;
+  resolvePaths?: RuntimePathResolver;
   assertSafePath(pathValue: string): Promise<void>;
   mkdir(directory: string, options: { recursive: true }): Promise<unknown>;
   loadUserState(paths: RuntimePaths): Promise<UserState>;
@@ -43,7 +45,7 @@ export async function startMarketRuntime(
   config: MarketRuntimeConfig,
   options: MarketRuntimeOptions,
 ): Promise<MarketRuntime> {
-  const paths = resolveRuntimePaths(options.baseDirectory, config.storageDir);
+  const paths = (options.resolvePaths ?? resolveRuntimePaths)(options.baseDirectory, config.storageDir);
   let repository: ServiceRepository | undefined;
   let requestLimiter: DisposableLimiter | undefined;
   let service: DisposableService | undefined;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readClaudeConfig, resolveClaudeBaseDirectory } from '../claude/config.ts';
+import { readClaudeConfig, resolveClaudeBaseDirectory, resolveClaudeRuntimePaths } from '../claude/config.ts';
 import { resolveDshBaseDirectory } from '../src/index.ts';
 
 const LOCAL_APP_DATA = 'C:\\Users\\fixture\\AppData\\Local';
@@ -29,6 +29,25 @@ test('Claude accepts an explicit D-drive storage directory', () => {
     LOCALAPPDATA: LOCAL_APP_DATA,
     CLAUDE_MARKET_STORAGE_DIR: 'D:\\AI\\claude-market-intelligence',
   }).storageDir, 'D:\\AI\\claude-market-intelligence');
+});
+
+test('Claude namespaces default and custom storage filenames away from DSH state', () => {
+  assert.deepEqual(
+    resolveClaudeRuntimePaths('C:\\Users\\fixture\\AppData\\Local\\dsh-market-intelligence\\claude'),
+    {
+      root: 'C:\\Users\\fixture\\AppData\\Local\\dsh-market-intelligence\\claude\\storages\\dsh-market-intelligence',
+      database: 'C:\\Users\\fixture\\AppData\\Local\\dsh-market-intelligence\\claude\\storages\\dsh-market-intelligence\\claude-market.sqlite',
+      config: 'C:\\Users\\fixture\\AppData\\Local\\dsh-market-intelligence\\claude\\storages\\dsh-market-intelligence\\claude-config.json',
+    },
+  );
+  assert.deepEqual(
+    resolveClaudeRuntimePaths('C:\\Users\\fixture\\AppData\\Local\\dsh-market-intelligence\\claude', 'D:\\AI\\dsh\\storages\\dsh-market-intelligence'),
+    {
+      root: 'D:\\AI\\dsh\\storages\\dsh-market-intelligence',
+      database: 'D:\\AI\\dsh\\storages\\dsh-market-intelligence\\claude-market.sqlite',
+      config: 'D:\\AI\\dsh\\storages\\dsh-market-intelligence\\claude-config.json',
+    },
+  );
 });
 
 test('Claude treats omitted and blank custom storage directories as absent', () => {

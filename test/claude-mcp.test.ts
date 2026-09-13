@@ -250,19 +250,28 @@ test('runClaudeServer passes Claude config and base directory through runtime an
   const fixture = createRuntimeFixture();
   const signals = new EventEmitter();
   const stderr = new PassThrough();
-  let received: { config: unknown; baseDirectory: string } | undefined;
+  let received: { config: unknown; baseDirectory: string; paths: unknown } | undefined;
   await runClaudeServer({
     LOCALAPPDATA: 'C:\\Users\\fixture\\AppData\\Local',
     CLAUDE_MARKET_STORAGE_DIR: 'D:\\market-data',
   }, {
     stdin: new PassThrough(), stdout: new PassThrough(), stderr, signals,
     runtimeFactory: async (config, options) => {
-      received = { config, baseDirectory: options.baseDirectory };
+      received = {
+        config,
+        baseDirectory: options.baseDirectory,
+        paths: options.resolvePaths?.(options.baseDirectory, config.storageDir),
+      };
       return fixture.runtime;
     },
   });
   assert.deepEqual(received, {
     baseDirectory: 'C:\\Users\\fixture\\AppData\\Local\\dsh-market-intelligence\\claude',
+    paths: {
+      root: 'D:\\market-data',
+      database: 'D:\\market-data\\claude-market.sqlite',
+      config: 'D:\\market-data\\claude-config.json',
+    },
     config: {
       storageDir: 'D:\\market-data', requestTimeoutMs: 10_000, providerBatchSize: 100, providerConcurrency: 4,
       quoteIntervalMs: 10_000, sectorIntervalMs: 60_000, sectorPersistIntervalMs: 300_000,

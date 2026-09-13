@@ -51,7 +51,7 @@ Sina Finance ────┘                                      │
 
 The repository stores raw quote observations, compacted minute and daily bars, sector observations and summaries, provider health, maintenance results, collection gaps, and crash-consistent recovery cursors. Writes that advance recovery state and persist the represented market data share one transaction.
 
-SQLite runtime files and `config.json` live under each adapter's configured storage root. DSH and Claude roots are independent runtime state; neither adapter imports, migrates, or synchronizes the other's data. They are intentionally excluded from Git, npm packages, and the MCPB package.
+SQLite runtime files and state configuration live under each adapter's configured storage root. DSH keeps its existing `market.sqlite` and `config.json` layout. Claude uses `claude-market.sqlite` and `claude-config.json` in its selected root, including a custom root, so it cannot open or modify DSH state when a user selects an overlapping directory. Neither adapter imports, migrates, or synchronizes the other's data. They are intentionally excluded from Git, npm packages, and the MCPB package.
 
 ## Safety boundaries
 

@@ -12,6 +12,7 @@ type SinaMarketProvider = Pick<MarketProvider, 'quotes'> & {
 type DisposableLimiter = RequestLimiter & {
     dispose(): Promise<void>;
 };
+export type RuntimePathResolver = (baseDirectory: string, storageDir?: string) => RuntimePaths;
 export type MarketRuntime = {
     service: MarketToolsService;
     paths: RuntimePaths;
@@ -19,6 +20,7 @@ export type MarketRuntime = {
 };
 export type MarketRuntimeOptions = {
     baseDirectory: string;
+    resolvePaths?: RuntimePathResolver;
     assertSafePath(pathValue: string): Promise<void>;
     mkdir(directory: string, options: {
         recursive: true;

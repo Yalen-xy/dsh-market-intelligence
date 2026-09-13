@@ -15,7 +15,7 @@ import { TencentProvider } from '../src/providers/tencent.js';
 import { MarketRepository } from '../src/repository.js';
 import { MarketScheduler, type Clock } from '../src/scheduler.js';
 import { MarketService } from '../src/service.js';
-import { readClaudeConfig, resolveClaudeBaseDirectory } from './config.js';
+import { readClaudeConfig, resolveClaudeBaseDirectory, resolveClaudeRuntimePaths } from './config.js';
 import { createClaudeLogger } from './logging.js';
 import { createClaudeMcpServer } from './mcp-server.js';
 import { ClaudeStdioServerTransport } from './stdio-transport.js';
@@ -58,6 +58,7 @@ export async function runClaudeServer(
 
   const runtimeOptions: MarketRuntimeOptions = {
     baseDirectory,
+    resolvePaths: resolveClaudeRuntimePaths,
     assertSafePath: assertSafeLocalWindowsPath,
     mkdir,
     loadUserState,

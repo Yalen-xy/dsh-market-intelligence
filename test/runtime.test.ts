@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { test } from 'node:test';
+import { loadUserState, mutateWatchlist, resolveRuntimePaths } from '../src/config.ts';
 import { startMarketRuntime, type MarketRuntimeConfig, type MarketRuntimeOptions } from '../src/runtime.ts';
 
 const config: MarketRuntimeConfig = {
@@ -65,6 +68,50 @@ test('starts shared runtime once and cancels the limiter before waiting for serv
     'dispose-service-start',
     'dispose-service-end',
   ]);
+});
+
+test('uses an explicit host path resolver to isolate Claude custom storage from DSH state', async (t) => {
+  const root = await mkdtemp(path.join(process.cwd(), '.tmp-claude-isolation-'));
+  const storageDir = path.join(root, 'shared-market-root');
+  const baseDirectory = path.join(root, 'claude-default-root');
+  const dshPaths = resolveRuntimePaths(baseDirectory, storageDir);
+  const claudePaths = {
+    root: storageDir,
+    database: path.join(storageDir, 'claude-market.sqlite'),
+    config: path.join(storageDir, 'claude-config.json'),
+  };
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  await mkdir(storageDir, { recursive: true });
+  const dshState = {
+    watchlist: ['sh600000'],
+    closures: { '2026': { CN: ['2026-10-01'], HK: [] } },
+  };
+  await writeFile(dshPaths.config, JSON.stringify(dshState), 'utf8');
+  await writeFile(dshPaths.database, 'DSH database sentinel', 'utf8');
+
+  const events: string[] = [];
+  const openedDatabases: string[] = [];
+  const options = fixtureOptions(events);
+  options.baseDirectory = baseDirectory;
+  options.resolvePaths = () => claudePaths;
+  options.mkdir = mkdir;
+  options.loadUserState = loadUserState;
+  options.mutateWatchlist = mutateWatchlist;
+  options.openRepository = (databasePath) => {
+    openedDatabases.push(databasePath);
+    return { close() { events.push('close-db'); } } as never;
+  };
+
+  const runtime = await startMarketRuntime({ ...config, storageDir }, options);
+  assert.deepEqual(runtime.paths, claudePaths);
+  assert.deepEqual(await loadUserState(runtime.paths), { watchlist: [], closures: {} });
+  await options.mutateWatchlist(runtime.paths, () => ['hk00700']);
+
+  assert.deepEqual(JSON.parse(await readFile(dshPaths.config, 'utf8')), dshState);
+  assert.equal(await readFile(dshPaths.database, 'utf8'), 'DSH database sentinel');
+  assert.deepEqual(openedDatabases, [claudePaths.database]);
+  assert.deepEqual(await loadUserState(claudePaths), { watchlist: ['hk00700'], closures: {} });
+  await runtime.dispose();
 });
 
 test('rolls back acquired resources when runtime startup fails', async () => {
