@@ -68,7 +68,7 @@ Returns CN call-auction or HK pre-open observations for symbols in the requested
 }
 ```
 
-Outside an auction/pre-open phase the tool returns a successful domain result with an empty `items` array and an explanatory reason.
+Outside an auction/pre-open phase the tool returns a successful domain result with an empty `items` array and an explanatory reason. With `TUSHARE_TOKEN` configured, CN responses also include `settlement`, containing the 09:25 final auction result for up to 100 requested A-share symbols. `settlement.availability` and `settlement.reason` distinguish available data from missing permission, source failures, and unavailable records. Final results are stored in the invoking adapter's SQLite database and can be read later that trading day. The live auction `items` and final `settlement.items` have separate availability; neither is inferred from the other. The token requires Tushare `stk_auction` permission and is not accepted in tool arguments.
 
 ## `market_watchlist`
 

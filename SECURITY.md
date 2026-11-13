@@ -19,6 +19,8 @@ Do not include real brokerage credentials, cookies, account identifiers, positio
 
 The plugin is intended to read public market observations through reviewed fixed endpoints. It must not accept arbitrary URLs, credentials, cookies, broker sessions, account data, order placement, executable downloads, or redirect-based host changes. Any proposal that expands this boundary requires a separate threat review and explicit user approval.
 
+The optional Tushare `stk_auction` integration is a reviewed, user-authorized exception for a market-data API token supplied only through `TUSHARE_TOKEN` in the host process environment. It sends that token only to the fixed HTTPS Tushare API endpoint, never through a model-visible argument or local configuration. See the [auction threat review](docs/TUSHARE-AUCTION-THREAT-REVIEW.md).
+
 Upstream availability, correctness, licensing, and format stability are data-quality risks rather than security guarantees. Provider parsing failures should fail visibly and must never be replaced with invented values.
 
 ## License and upstream-source boundary

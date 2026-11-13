@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import type { Bar, CanonicalQuote, Market, SectorObservation } from '../src/model.ts';
+import type { AuctionSettlement, Bar, CanonicalQuote, Market, SectorObservation } from '../src/model.ts';
 import { MarketRepository, type CollectionGap, type RecoveryCursorSeed, type RecoverySegmentCommit } from '../src/repository.ts';
 
 type CrashConsistentRepository = MarketRepository & {
@@ -25,6 +25,22 @@ function openRepository(): { repo: MarketRepository; database: string } {
   const database = join(directory, 'market.sqlite');
   return { repo: MarketRepository.open(database), database };
 }
+
+test('persists final auction settlements across repository reopen and isolates trading dates', () => {
+  const { repo, database } = openRepository();
+  const settlement: AuctionSettlement = {
+    symbol: 'sh600000', tradingDate: '2026-11-13', price: 10.5, volume: 12000,
+    amount: 126000, previousClose: 10, turnoverRate: 0.2, volumeRatio: 1.4,
+    fetchedAt: '2026-11-13T01:27:00.000Z', source: 'tushare',
+  };
+  repo.writeAuctionSettlements([settlement]);
+  repo.close();
+  const reopened = MarketRepository.open(database);
+  assert.deepEqual(reopened.readAuctionSettlements('2026-11-13', ['sh600000']), [settlement]);
+  assert.deepEqual(reopened.readAuctionSettlements('2026-11-14', ['sh600000']), []);
+  assert.deepEqual(reopened.readAuctionSettlements('2026-11-13', ['sz000001']), []);
+  reopened.close();
+});
 
 function crashConsistentRepository(repo: MarketRepository): CrashConsistentRepository {
   const candidate = repo as Partial<CrashConsistentRepository>;
@@ -94,7 +110,7 @@ function sector(overrides: Partial<SectorObservation> = {}): SectorObservation {
   };
 }
 
-test('opens schema v3 with the recovery checkpoint table and durable SQLite pragmas', () => {
+test('opens schema v3 with recovery and auction settlement tables and durable SQLite pragmas', () => {
   const { repo, database } = openRepository();
   repo.close();
 
@@ -102,6 +118,7 @@ test('opens schema v3 with the recovery checkpoint table and durable SQLite prag
   const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()
     .map((row) => row.name);
   assert.deepEqual(tables, [
+    'auction_settlements',
     'bars',
     'collection_gaps',
     'maintenance_runs',
@@ -438,7 +455,7 @@ test('close is idempotent and all operations reject after close', () => {
   assert.throws(() => repo.latestQuotes(['sh600000']), /closed/i);
 });
 
-test('migrates a schema v1 sector table in place and adds only the v3 recovery checkpoint table', () => {
+test('migrates a schema v1 sector table in place and adds recovery and auction settlement tables', () => {
   const directory = mkdtempSync(join(tmpdir(), 'dsh-market-repository-v1-'));
   temporaryDirectories.push(directory);
   const database = join(directory, 'market.sqlite');
@@ -460,7 +477,7 @@ test('migrates a schema v1 sector table in place and adds only the v3 recovery c
   repo.close();
   const migrated = new DatabaseSync(database);
   assert.equal(migrated.prepare('PRAGMA user_version').get()?.user_version, 3);
-  assert.equal(migrated.prepare("SELECT count(*) AS count FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()?.count, 7);
+  assert.equal(migrated.prepare("SELECT count(*) AS count FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()?.count, 8);
   migrated.close();
 });
 

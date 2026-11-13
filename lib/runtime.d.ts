@@ -3,6 +3,7 @@ import { type RequestLimiter } from './http.js';
 import type { MarketProvider } from './providers/provider.js';
 import type { SinaProvider, SinaProviderOptions } from './providers/sina.js';
 import type { TencentProviderOptions } from './providers/tencent.js';
+import type { TushareAuctionOptions, TushareAuctionProvider } from './providers/tushare-auction.js';
 import type { Clock, MarketSchedulerOptions } from './scheduler.js';
 import type { MarketService, MarketServiceOptions, ServiceRepository, ServiceScheduler } from './service.js';
 import type { MarketToolsService } from './tool-contracts.js';
@@ -31,6 +32,8 @@ export type MarketRuntimeOptions = {
     createRequestLimiter(concurrency: number): DisposableLimiter;
     createTencent(options: TencentProviderOptions): MarketProvider;
     createSina(options: SinaProviderOptions): SinaMarketProvider;
+    getTushareToken?(): string | undefined;
+    createTushareAuction?(options: TushareAuctionOptions): Pick<TushareAuctionProvider, 'fetch'>;
     createScheduler(options: MarketSchedulerOptions): ServiceScheduler;
     createService(options: MarketServiceOptions): MarketService;
     clock: Clock;

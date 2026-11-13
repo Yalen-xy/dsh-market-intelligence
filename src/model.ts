@@ -28,6 +28,19 @@ export type CanonicalQuote = {
   isStale: boolean;
 };
 
+export type AuctionSettlement = {
+  symbol: string;
+  tradingDate: string;
+  price: number | null;
+  volume: number;
+  amount: number;
+  previousClose: number | null;
+  turnoverRate: number | null;
+  volumeRatio: number | null;
+  fetchedAt: string;
+  source: 'tushare';
+};
+
 export type Bar = {
   symbol: string;
   market: Market;

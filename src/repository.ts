@@ -2,7 +2,7 @@ import { mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { shanghaiDate } from './calendar.js';
-import type { Bar, CanonicalQuote, Market, SectorObservation } from './model.js';
+import type { AuctionSettlement, Bar, CanonicalQuote, Market, SectorObservation } from './model.js';
 import { canonicalizeSymbol } from './symbols.js';
 
 export type SeriesQuery = {
@@ -221,6 +221,22 @@ CREATE INDEX IF NOT EXISTS bars_retention
   ON bars (interval, market, trading_date, timestamp, symbol);
 `;
 
+const AUCTION_SETTLEMENT_SCHEMA = `
+CREATE TABLE IF NOT EXISTS auction_settlements (
+  symbol TEXT NOT NULL,
+  trading_date TEXT NOT NULL,
+  price REAL,
+  volume REAL NOT NULL,
+  amount REAL NOT NULL,
+  previous_close REAL,
+  turnover_rate REAL,
+  volume_ratio REAL,
+  fetched_at TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source = 'tushare'),
+  PRIMARY KEY (symbol, trading_date)
+) WITHOUT ROWID;
+`;
+
 export class MarketRepository {
   readonly path: string;
   private readonly database: DatabaseSync;
@@ -261,6 +277,7 @@ export class MarketRepository {
         assertBarSchemaV2(database);
         assertRecoverySchemaV3(database);
       }
+      database.exec(AUCTION_SETTLEMENT_SCHEMA);
       return new MarketRepository(path, database);
     } catch (error) {
       database.close();
@@ -274,6 +291,51 @@ export class MarketRepository {
     for (const quote of quotes) validateQuote(quote);
     if (quotes.length === 0) return;
     this.transaction(() => this.insertQuotes(quotes));
+  }
+
+  writeAuctionSettlements(items: AuctionSettlement[]): void {
+    this.assertOpen();
+    assertDenseArray(items, 'auction settlements');
+    const statement = this.database.prepare(`
+      INSERT INTO auction_settlements
+        (symbol, trading_date, price, volume, amount, previous_close, turnover_rate, volume_ratio, fetched_at, source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (symbol, trading_date) DO UPDATE SET
+        price = excluded.price, volume = excluded.volume, amount = excluded.amount,
+        previous_close = excluded.previous_close, turnover_rate = excluded.turnover_rate,
+        volume_ratio = excluded.volume_ratio, fetched_at = excluded.fetched_at
+    `);
+    for (const item of items) {
+      validatedCanonicalSymbol(item.symbol, 'auction symbol');
+      if (!TRADING_DATE.test(item.tradingDate) || item.source !== 'tushare') throw new Error('Invalid auction settlement');
+      requireTimestamp(item.fetchedAt, 'auction fetchedAt');
+      for (const value of [item.volume, item.amount, item.price, item.previousClose, item.turnoverRate, item.volumeRatio]) {
+        if (value !== null && (typeof value !== 'number' || !Number.isFinite(value) || value < 0)) throw new Error('Invalid auction settlement');
+      }
+      if (item.volume === null || item.amount === null) throw new Error('Invalid auction settlement');
+    }
+    this.transaction(() => {
+      for (const item of items) statement.run(item.symbol, item.tradingDate, item.price, item.volume, item.amount, item.previousClose, item.turnoverRate, item.volumeRatio, item.fetchedAt, item.source);
+    });
+  }
+
+  readAuctionSettlements(tradingDate: string, symbols: string[]): AuctionSettlement[] {
+    this.assertOpen();
+    if (!TRADING_DATE.test(tradingDate)) throw new Error('Invalid auction trading date');
+    assertDenseArray(symbols, 'auction symbols');
+    const unique = [...new Set(symbols.map((item) => validatedCanonicalSymbol(item, 'auction symbol')))];
+    if (unique.length === 0) return [];
+    const rows = this.database.prepare(`
+      SELECT * FROM auction_settlements WHERE trading_date = ? AND symbol IN (${unique.map(() => '?').join(', ')})
+      ORDER BY symbol
+    `).all(tradingDate, ...unique);
+    return rows.map((row) => ({
+      symbol: stringColumn(row, 'symbol'), tradingDate: stringColumn(row, 'trading_date'),
+      price: nullableNumberColumn(row, 'price'), volume: numberColumn(row, 'volume'),
+      amount: numberColumn(row, 'amount'), previousClose: nullableNumberColumn(row, 'previous_close'),
+      turnoverRate: nullableNumberColumn(row, 'turnover_rate'), volumeRatio: nullableNumberColumn(row, 'volume_ratio'),
+      fetchedAt: stringColumn(row, 'fetched_at'), source: 'tushare' as const,
+    }));
   }
 
   initializeRecoveryCursors(provider: string, interval: 'quote', seeds: RecoveryCursorSeed[], updatedAt: string): void {

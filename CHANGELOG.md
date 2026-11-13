@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. The project follows semantic versioning for repository releases.
 
+## Unreleased
+
+### Added
+
+- Optional Tushare `stk_auction` source for A-share 09:25 final opening-auction results, with SQLite persistence and a separate `market_auction.settlement` result in both host adapters.
+- Fixed-endpoint token handling, offline coverage, and a dedicated threat review for the optional source.
+
 ## [0.2.0] - 2026-08-31
 
 ### Added

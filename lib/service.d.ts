@@ -1,5 +1,5 @@
 import { type UserState, type WatchlistMutation } from './config.js';
-import type { Availability, Bar, CanonicalQuote, Market, MarketPhase, SectorObservation, SourceConflict } from './model.js';
+import type { AuctionSettlement, Availability, Bar, CanonicalQuote, Market, MarketPhase, SectorObservation, SourceConflict } from './model.js';
 import type { MarketProvider, SectorResult } from './providers/provider.js';
 import { type MaintenanceResult, type RetentionPolicy } from './retention.js';
 import { type CollectionGap, type ProviderHealthUpdate, type RecoveryCursorSeed, type RecoverySegmentCommit, type RepositoryHealth, type SectorQuery, type SectorResolution, type SeriesQuery } from './repository.js';
@@ -8,6 +8,8 @@ type SinaProvider = Pick<MarketProvider, 'quotes'> & {
     sectors(signal: AbortSignal): Promise<SectorResult>;
 };
 export type ServiceRepository = {
+    writeAuctionSettlements?(items: AuctionSettlement[]): void;
+    readAuctionSettlements?(tradingDate: string, symbols: string[]): AuctionSettlement[];
     writeBatch(quotes: CanonicalQuote[]): void;
     latestQuotes(symbols: string[]): CanonicalQuote[];
     writeBars(bars: Bar[]): void;
@@ -45,6 +47,9 @@ export type MarketServiceOptions = {
     clock: Pick<Clock, 'now'>;
     tencent: MarketProvider;
     sina: SinaProvider;
+    auctionSettlement?: {
+        fetch(symbols: string[], tradingDate: string, signal: AbortSignal): Promise<AuctionSettlement[]>;
+    };
     repository: ServiceRepository;
     scheduler: ServiceScheduler;
     stateStore: ServiceStateStore;
@@ -112,6 +117,11 @@ export type AuctionServiceResult = {
     phase: MarketPhase;
     reason: string | null;
     items: CanonicalQuote[];
+    settlement?: {
+        availability: Availability;
+        reason: string | null;
+        items: AuctionSettlement[];
+    };
 };
 export type WatchlistRequest = {
     action: 'get' | 'add' | 'remove';
@@ -153,6 +163,7 @@ export declare class MarketService {
     private readonly clock;
     private readonly tencent;
     private readonly sina;
+    private readonly auctionSettlement?;
     private readonly repository;
     private readonly scheduler;
     private readonly stateStore;
@@ -189,6 +200,7 @@ export declare class MarketService {
     private sectorsOperation;
     auction(request: AuctionRequest, requestSignal: AbortSignal): Promise<AuctionServiceResult>;
     private auctionOperation;
+    private readAuctionSettlement;
     watchlist(request: WatchlistRequest, requestSignal?: AbortSignal): Promise<WatchlistResult>;
     private watchlistOperation;
     health(): HealthResult;

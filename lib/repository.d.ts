@@ -1,4 +1,4 @@
-import type { Bar, CanonicalQuote, Market, SectorObservation } from './model.js';
+import type { AuctionSettlement, Bar, CanonicalQuote, Market, SectorObservation } from './model.js';
 export type SeriesQuery = {
     symbol: string;
     interval: string;
@@ -93,6 +93,8 @@ export declare class MarketRepository {
     private constructor();
     static open(path: string): MarketRepository;
     writeBatch(quotes: CanonicalQuote[]): void;
+    writeAuctionSettlements(items: AuctionSettlement[]): void;
+    readAuctionSettlements(tradingDate: string, symbols: string[]): AuctionSettlement[];
     initializeRecoveryCursors(provider: string, interval: 'quote', seeds: RecoveryCursorSeed[], updatedAt: string): void;
     recoveryCursor(provider: string, market: Market, interval: 'quote'): string | null;
     commitRecoverySegment(segment: RecoverySegmentCommit): void;

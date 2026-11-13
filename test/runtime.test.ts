@@ -70,6 +70,25 @@ test('starts shared runtime once and cancels the limiter before waiting for serv
   ]);
 });
 
+test('shared runtime wires an optional auction token only to the fixed settlement provider', async () => {
+  const options = fixtureOptions([]);
+  let received: Record<string, unknown> | undefined;
+  let configured = false;
+  options.getTushareToken = () => 'test-token';
+  options.createTushareAuction = (providerOptions) => {
+    received = providerOptions as unknown as Record<string, unknown>;
+    return { fetch: async () => [] };
+  };
+  options.createService = (serviceOptions) => {
+    configured = typeof serviceOptions.auctionSettlement?.fetch === 'function';
+    return { dispose: async () => undefined } as never;
+  };
+  const runtime = await startMarketRuntime(config, options);
+  assert.equal(received?.token, 'test-token');
+  assert.equal(configured, true);
+  await runtime.dispose();
+});
+
 test('uses an explicit host path resolver to isolate Claude custom storage from DSH state', async (t) => {
   const root = await mkdtemp(path.join(process.cwd(), '.tmp-claude-isolation-'));
   const storageDir = path.join(root, 'shared-market-root');

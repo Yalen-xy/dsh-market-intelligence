@@ -12,6 +12,7 @@ import { createSharedRequestLimiter, startMarketRuntime, type MarketRuntime, typ
 import { assertSafeLocalWindowsPath } from '../src/paths.js';
 import { SinaProvider } from '../src/providers/sina.js';
 import { TencentProvider } from '../src/providers/tencent.js';
+import { TushareAuctionProvider } from '../src/providers/tushare-auction.js';
 import { MarketRepository } from '../src/repository.js';
 import { MarketScheduler, type Clock } from '../src/scheduler.js';
 import { MarketService } from '../src/service.js';
@@ -67,6 +68,8 @@ export async function runClaudeServer(
     createRequestLimiter: createSharedRequestLimiter,
     createTencent: (options) => new TencentProvider(options),
     createSina: (options) => new SinaProvider(options),
+    getTushareToken: () => environment.TUSHARE_TOKEN,
+    createTushareAuction: (options) => new TushareAuctionProvider(options),
     createScheduler: (options) => new MarketScheduler(options),
     createService: (options) => new MarketService(options),
     clock: systemClock,

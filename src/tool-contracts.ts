@@ -222,6 +222,31 @@ const auctionOutputSchema = {
     phase: { type: 'string', enum: PHASE, required: true },
     reason: { ...nullableString, required: true },
     items: { type: 'array', items: quoteSchema, required: true },
+    settlement: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        availability: { type: 'string', enum: AVAILABILITY, required: true },
+        reason: { ...nullableString, required: true },
+        items: {
+          type: 'array', required: true,
+          items: {
+            type: 'object', additionalProperties: false,
+            properties: {
+              symbol: { type: 'string', required: true },
+              tradingDate: { type: 'string', required: true },
+              price: { ...nullableNumber, required: true },
+              volume: { type: 'number', required: true },
+              amount: { type: 'number', required: true },
+              previousClose: { ...nullableNumber, required: true },
+              turnoverRate: { ...nullableNumber, required: true },
+              volumeRatio: { ...nullableNumber, required: true },
+              fetchedAt: { type: 'string', required: true },
+              source: { type: 'string', enum: ['tushare'], required: true },
+            },
+          },
+        },
+      },
+    },
   },
 } as const;
 
@@ -413,7 +438,7 @@ export function createMarketToolContracts(service: MarketToolsService, _paths: T
       const result = await service.sectors({ ...input, refresh: input.refresh ?? true }, context.signal);
       return projectToolOutput('market_sectors', OUTPUT_SCHEMAS.market_sectors, () => projectSectors(result, input.limit ?? 500));
     }),
-    contract('market_auction', 'Read A-share call-auction or Hong Kong pre-open observations.', auctionParameters, OUTPUT_SCHEMAS.market_auction, async (args, context) => {
+    contract('market_auction', 'Read A-share call-auction or Hong Kong pre-open observations. Configured CN results also include final 09:25 auction trades after 09:26.', auctionParameters, OUTPUT_SCHEMAS.market_auction, async (args, context) => {
       const input = args as { market: 'CN' | 'HK'; symbols?: string[] };
       requireAtMost100(input.symbols, 'symbols');
       const request = input.symbols === undefined ? input : { ...input, symbols: canonicalInputSymbols(input.symbols, 'symbols').map((canonical) => {
@@ -680,11 +705,17 @@ function projectSectors(value: SectorsResult, limit: number): ToolSectorsResult 
 
 function projectAuction(value: AuctionServiceResult): AuctionServiceResult {
   requireOutputCollection('market_auction', 'items', value.items, 100);
+  if (value.settlement) requireOutputCollection('market_auction', 'settlement.items', value.settlement.items, 100);
   return {
     availability: value.availability,
     phase: value.phase,
     reason: value.reason,
     items: value.items.map((item, index) => projectQuote(item, `items[${index}]`)),
+    ...(value.settlement ? { settlement: {
+      availability: value.settlement.availability,
+      reason: value.settlement.reason,
+      items: value.settlement.items.map((item) => ({ ...item })),
+    } } : {}),
   };
 }
 

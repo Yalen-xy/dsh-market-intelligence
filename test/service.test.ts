@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { UserState, WatchlistMutation } from '../src/config.ts';
-import type { Bar, CanonicalQuote, Market, SectorObservation } from '../src/model.ts';
+import type { AuctionSettlement, Bar, CanonicalQuote, Market, SectorObservation } from '../src/model.ts';
 import type { CollectionGap, ProviderHealthUpdate, RecoveryCursorSeed, RecoverySegmentCommit, RepositoryHealth, SectorQuery, SeriesQuery } from '../src/repository.ts';
 import type { SchedulerCallbacks } from '../src/scheduler.ts';
 import { MarketService, type MarketServiceOptions, type ServiceRepository } from '../src/service.ts';
@@ -316,6 +316,63 @@ test('returns inactive auction as a successful unavailable domain result and fil
   assert.equal(result.availability, 'live');
   assert.deepEqual(result.items.map(({ symbol }) => symbol), ['sh600000']);
   assert.deepEqual(active.tencent.auctionCalls[0]?.symbols, ['sh600000']);
+});
+
+test('returns and persists the 09:25 final auction result separately from provisional quotes', async () => {
+  const settlement: AuctionSettlement = {
+    symbol: 'sh600000', tradingDate: '2026-08-27', price: 10.5, volume: 12000,
+    amount: 126000, previousClose: 10, turnoverRate: 0.2, volumeRatio: 1.4,
+    fetchedAt: '2026-08-27T01:27:00.000Z', source: 'tushare',
+  };
+  let calls = 0;
+  const fixture = serviceFixture({
+    now: new Date('2026-08-27T01:27:00.000Z'),
+    auctionSettlementFetch: async () => { calls++; return [settlement]; },
+  });
+  const first = await fixture.service.auction({ market: 'CN', symbols: ['sh600000'] }, signal());
+  assert.equal(first.items[0]?.source, 'tencent');
+  assert.deepEqual(first.settlement, { availability: 'live', reason: null, items: [settlement] });
+  const second = await fixture.service.auction({ market: 'CN', symbols: ['sh600000'] }, signal());
+  assert.deepEqual(second.settlement?.items, [settlement]);
+  assert.equal(calls, 1);
+  assert.deepEqual(fixture.repository.readAuctionSettlements('2026-08-27', ['sh600000']), [settlement]);
+});
+
+test('does not fetch final auction trades before 09:26 and still serves them after 09:30', async () => {
+  let earlyCalls = 0;
+  const early = serviceFixture({
+    now: new Date('2026-08-27T01:25:00.000Z'),
+    auctionSettlementFetch: async () => { earlyCalls++; return []; },
+  });
+  const before = await early.service.auction({ market: 'CN', symbols: ['sh600000'] }, signal());
+  assert.equal(before.settlement?.availability, 'unavailable');
+  assert.equal(earlyCalls, 0);
+
+  const late = serviceFixture({
+    now: new Date('2026-08-27T01:31:00.000Z'),
+    auctionSettlementFetch: async () => [{
+      symbol: 'sh600000', tradingDate: '2026-08-27', price: 10.5, volume: 12000,
+      amount: 126000, previousClose: 10, turnoverRate: 0.2, volumeRatio: 1.4,
+      fetchedAt: '2026-08-27T01:31:00.000Z', source: 'tushare',
+    }],
+  });
+  const after = await late.service.auction({ market: 'CN', symbols: ['sh600000'] }, signal());
+  assert.equal(after.phase, 'continuous');
+  assert.deepEqual(after.items, []);
+  assert.equal(after.settlement?.items[0]?.price, 10.5);
+});
+
+test('a failed final auction database write is surfaced instead of hiding a valid fetched result', async () => {
+  const fixture = serviceFixture({
+    now: new Date('2026-08-27T01:27:00.000Z'),
+    auctionSettlementFetch: async () => [{
+      symbol: 'sh600000', tradingDate: '2026-08-27', price: 10.5, volume: 12000,
+      amount: 126000, previousClose: 10, turnoverRate: 0.2, volumeRatio: 1.4,
+      fetchedAt: '2026-08-27T01:27:00.000Z', source: 'tushare',
+    }],
+  });
+  fixture.repository.writeAuctionSettlements = () => { throw new Error('disk full'); };
+  await assert.rejects(fixture.service.auction({ market: 'CN', symbols: ['sh600000'] }, signal()), /disk full/);
 });
 
 test('caps auction before the provider and falls back to stale cache for mismatched or wholly invalid live responses', async () => {
@@ -1191,6 +1248,7 @@ type FixtureOverrides = {
   sinaQuotes?: QuoteScript;
   tencentSeries?: SeriesScript;
   tencentAuction?: AuctionScript;
+  auctionSettlementFetch?: (symbols: string[], tradingDate: string, signal: AbortSignal) => Promise<AuctionSettlement[]>;
   tencentHistory?: HistoryScript;
   sinaSectors?: SectorScript;
   config?: MarketServiceOptions['config'];
@@ -1230,6 +1288,7 @@ function serviceFixture(overrides: FixtureOverrides = {}) {
     clock: { now: () => new Date(now) },
     tencent,
     sina,
+    auctionSettlement: overrides.auctionSettlementFetch === undefined ? undefined : { fetch: overrides.auctionSettlementFetch },
     repository,
     scheduler,
     stateStore,
@@ -1354,6 +1413,7 @@ class RepositoryDouble implements ServiceRepository {
   providerHealthWriteError: Error | undefined;
   closeCalls = 0;
   private readonly quotes = new Map<string, CanonicalQuote>();
+  private readonly auctionSettlements = new Map<string, AuctionSettlement>();
   private bars: Bar[];
   private sectors: SectorObservation[];
   private readonly repositoryHealth: RepositoryHealth;
@@ -1391,6 +1451,17 @@ class RepositoryDouble implements ServiceRepository {
   latestQuotes(symbols: string[]): CanonicalQuote[] {
     return symbols.flatMap((symbol) => {
       const item = this.quotes.get(symbol);
+      return item ? [{ ...item }] : [];
+    });
+  }
+
+  writeAuctionSettlements(items: AuctionSettlement[]): void {
+    for (const item of items) this.auctionSettlements.set(`${item.tradingDate}:${item.symbol}`, { ...item });
+  }
+
+  readAuctionSettlements(tradingDate: string, symbols: string[]): AuctionSettlement[] {
+    return symbols.flatMap((symbol) => {
+      const item = this.auctionSettlements.get(`${tradingDate}:${symbol}`);
       return item ? [{ ...item }] : [];
     });
   }

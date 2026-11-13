@@ -9,6 +9,7 @@ import {
 import { mkdir } from 'node:fs/promises';
 import { SinaProvider } from './providers/sina.js';
 import { TencentProvider } from './providers/tencent.js';
+import { TushareAuctionProvider } from './providers/tushare-auction.js';
 import { MarketRepository } from './repository.js';
 import { MarketScheduler, type Clock } from './scheduler.js';
 import { MarketService } from './service.js';
@@ -81,6 +82,7 @@ const systemClock: Clock = {
 
 const defaultDependencies: PluginDependencies = {
   getDshHome: () => resolveDshBaseDirectory(process.env),
+  getTushareToken: () => process.env.TUSHARE_TOKEN,
   assertSafePath: assertSafeLocalWindowsPath,
   mkdir,
   loadUserState,
@@ -89,6 +91,7 @@ const defaultDependencies: PluginDependencies = {
   createRequestLimiter: createSharedRequestLimiter,
   createTencent: (options) => new TencentProvider(options),
   createSina: (options) => new SinaProvider(options),
+  createTushareAuction: (options) => new TushareAuctionProvider(options),
   createScheduler: (options) => new MarketScheduler(options),
   createService: (options) => new MarketService(options),
   registerTools: registerMarketTools,

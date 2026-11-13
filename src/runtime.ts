@@ -4,6 +4,7 @@ import { SharedRequestLimiter, type RequestLimiter } from './http.js';
 import type { MarketProvider } from './providers/provider.js';
 import type { SinaProvider, SinaProviderOptions } from './providers/sina.js';
 import type { TencentProvider, TencentProviderOptions } from './providers/tencent.js';
+import type { TushareAuctionOptions, TushareAuctionProvider } from './providers/tushare-auction.js';
 import type { Clock, MarketSchedulerOptions } from './scheduler.js';
 import type { MarketService, MarketServiceOptions, ServiceRepository, ServiceScheduler } from './service.js';
 import type { MarketToolsService } from './tool-contracts.js';
@@ -34,6 +35,8 @@ export type MarketRuntimeOptions = {
   createRequestLimiter(concurrency: number): DisposableLimiter;
   createTencent(options: TencentProviderOptions): MarketProvider;
   createSina(options: SinaProviderOptions): SinaMarketProvider;
+  getTushareToken?(): string | undefined;
+  createTushareAuction?(options: TushareAuctionOptions): Pick<TushareAuctionProvider, 'fetch'>;
   createScheduler(options: MarketSchedulerOptions): ServiceScheduler;
   createService(options: MarketServiceOptions): MarketService;
   clock: Clock;
@@ -103,6 +106,11 @@ export async function startMarketRuntime(
       requestLimiter,
     });
     const sina = options.createSina({ now, requestTimeoutMs: config.requestTimeoutMs, requestLimiter });
+    const tushareToken = options.getTushareToken?.()?.trim();
+    if (tushareToken && !options.createTushareAuction) throw new Error('Tushare auction provider is unavailable');
+    const auctionSettlement = tushareToken
+      ? options.createTushareAuction!({ token: tushareToken, timeoutMs: config.requestTimeoutMs, requestLimiter, now: () => options.clock.now() })
+      : undefined;
     const scheduler = options.createScheduler({
       clock: options.clock,
       closures: initialState.closures,
@@ -114,6 +122,7 @@ export async function startMarketRuntime(
       clock: options.clock,
       tencent,
       sina,
+      auctionSettlement,
       repository,
       scheduler,
       stateStore: {

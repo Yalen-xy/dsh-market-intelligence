@@ -1,6 +1,6 @@
 import { isMarketTradingDate, lastClosedTradingDate, marketState, nextStateChange, shanghaiDate, shanghaiMinuteOfDay, type MarketClosures } from './calendar.js';
 import { validateMarketClosures, type UserState, type WatchlistMutation } from './config.js';
-import type { Availability, Bar, CanonicalQuote, Market, MarketPhase, SectorObservation, SourceConflict } from './model.js';
+import type { AuctionSettlement, Availability, Bar, CanonicalQuote, Market, MarketPhase, SectorObservation, SourceConflict } from './model.js';
 import type { MarketProvider, ProviderHistoryCapability, QuoteResult, SectorResult } from './providers/provider.js';
 import { DEFAULT_MAX_BYTES, maintainRepository, type MaintenanceResult, type RetentionPolicy } from './retention.js';
 import { MarketRepository, type CollectionGap, type ProviderHealthUpdate, type RecoveryCursorSeed, type RecoverySegmentCommit, type RepositoryHealth, type SectorQuery, type SectorResolution, type SeriesQuery } from './repository.js';
@@ -12,6 +12,8 @@ type SinaProvider = Pick<MarketProvider, 'quotes'> & {
 };
 
 export type ServiceRepository = {
+  writeAuctionSettlements?(items: AuctionSettlement[]): void;
+  readAuctionSettlements?(tradingDate: string, symbols: string[]): AuctionSettlement[];
   writeBatch(quotes: CanonicalQuote[]): void;
   latestQuotes(symbols: string[]): CanonicalQuote[];
   writeBars(bars: Bar[]): void;
@@ -55,6 +57,7 @@ export type MarketServiceOptions = {
   clock: Pick<Clock, 'now'>;
   tencent: MarketProvider;
   sina: SinaProvider;
+  auctionSettlement?: { fetch(symbols: string[], tradingDate: string, signal: AbortSignal): Promise<AuctionSettlement[]> };
   repository: ServiceRepository;
   scheduler: ServiceScheduler;
   stateStore: ServiceStateStore;
@@ -130,6 +133,7 @@ export type AuctionServiceResult = {
   phase: MarketPhase;
   reason: string | null;
   items: CanonicalQuote[];
+  settlement?: { availability: Availability; reason: string | null; items: AuctionSettlement[] };
 };
 
 export type WatchlistRequest = {
@@ -223,6 +227,7 @@ export class MarketService {
   private readonly clock: Pick<Clock, 'now'>;
   private readonly tencent: MarketProvider;
   private readonly sina: SinaProvider;
+  private readonly auctionSettlement?: NonNullable<MarketServiceOptions['auctionSettlement']>;
   private readonly repository: ServiceRepository;
   private readonly scheduler: ServiceScheduler;
   private readonly stateStore: ServiceStateStore;
@@ -259,6 +264,7 @@ export class MarketService {
     this.clock = options.clock;
     this.tencent = options.tencent;
     this.sina = options.sina;
+    this.auctionSettlement = options.auctionSettlement;
     this.repository = options.repository;
     this.scheduler = options.scheduler;
     this.stateStore = options.stateStore;
@@ -527,13 +533,19 @@ export class MarketService {
     validateMarket(request.market);
     const phase = marketState(this.now(), this.closures)[request.market].phase;
     const expectedPhase: MarketPhase = request.market === 'CN' ? 'auction' : 'preopen';
-    if (phase !== expectedPhase) {
+    if (phase !== expectedPhase && (request.market !== 'CN' || this.auctionSettlement === undefined)) {
       return { availability: 'unavailable', phase, reason: `${request.market} auction is inactive`, items: [] };
     }
     const requested = requestedSymbols(request.symbols ?? this.watchlistSnapshot);
     if (requested.length > 100) throw new Error('At most 100 symbols may be requested');
     const symbols = requested.filter((symbol) => canonicalizeSymbol(symbol).market === request.market);
     if (symbols.length === 0) return { availability: 'unavailable', phase, reason: 'No symbols requested', items: [] };
+    const settlement = request.market === 'CN' && this.auctionSettlement
+      ? await this.readAuctionSettlement(symbols, requestSignal)
+      : undefined;
+    if (phase !== expectedPhase) {
+      return { availability: 'unavailable', phase, reason: `${request.market} auction is inactive`, items: [], ...(settlement ? { settlement } : {}) };
+    }
 
     const attempt = this.beginAttempt('tencent');
     try {
@@ -562,6 +574,7 @@ export class MarketService {
         phase,
         reason: items.length > 0 ? null : 'No auction observations available',
         items,
+        ...(settlement ? { settlement } : {}),
       };
     } catch (error) {
       if (requestSignal.aborted) throw abortReason(requestSignal);
@@ -577,8 +590,42 @@ export class MarketService {
         phase,
         reason: items.length > 0 ? 'Live auction refresh failed' : 'No auction observations available',
         items,
+        ...(settlement ? { settlement } : {}),
       };
     }
+  }
+
+  private async readAuctionSettlement(symbols: string[], signal: AbortSignal): Promise<NonNullable<AuctionServiceResult['settlement']>> {
+    const now = this.now();
+    const tradingDate = shanghaiDate(now);
+    if (!isMarketTradingDate(tradingDate, 'CN', this.closures) || shanghaiMinuteOfDay(now) < 9 * 60 + 26) {
+      return { availability: 'unavailable', reason: 'Final auction result is not ready', items: [] };
+    }
+    const cached = this.withStorageHealth(() => {
+      if (!this.repository.readAuctionSettlements) throw new Error('Auction settlement storage unavailable');
+      return this.repository.readAuctionSettlements(tradingDate, symbols);
+    });
+    if (cached.length === symbols.length) return { availability: 'cached', reason: null, items: cached };
+    let fetched: AuctionSettlement[];
+    try {
+      fetched = await this.auctionSettlement!.fetch(symbols, tradingDate, signal);
+      const requested = new Set(symbols);
+      const seen = new Set<string>();
+      for (const item of fetched) {
+        if (!requested.has(item.symbol) || seen.has(item.symbol) || item.tradingDate !== tradingDate || item.source !== 'tushare') {
+          throw new Error('Invalid auction settlement');
+        }
+        seen.add(item.symbol);
+      }
+    } catch {
+      if (signal.aborted) throw abortReason(signal);
+      return { availability: cached.length > 0 ? 'stale' : 'unavailable', reason: 'Final auction result fetch failed', items: cached };
+    }
+    this.withStorageHealth(() => {
+      if (!this.repository.writeAuctionSettlements) throw new Error('Auction settlement storage unavailable');
+      this.repository.writeAuctionSettlements(fetched);
+    });
+    return { availability: fetched.length > 0 ? 'live' : 'unavailable', reason: fetched.length > 0 ? null : 'No final auction trades available', items: fetched };
   }
 
   watchlist(request: WatchlistRequest, requestSignal?: AbortSignal): Promise<WatchlistResult> {

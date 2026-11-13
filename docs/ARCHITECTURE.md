@@ -16,6 +16,7 @@ The DSH and Claude adapters never share a live SQLite database, watchlist, confi
 Tencent Finance ─┐
                  ├─ fixed-host HTTP policy ─ provider adapters ─ normalization
 Sina Finance ────┘                                      │
+Tushare (optional 09:25 settlement) ─────────────────────┤
                                                         ▼
                                                shared MarketService
                                               /          |          \
@@ -45,18 +46,18 @@ Sina Finance ────┘                                      │
 | Calendar | `src/calendar.ts` | Computes CN/HK phases in `Asia/Shanghai` and applies configured market closures. |
 | Symbols | `src/symbols.ts` | Canonicalizes supported A/H securities and fixed market indices. |
 | HTTP policy | `src/http.ts` | Allows only reviewed hosts/routes, rejects redirects and credentials, and limits concurrency, time, and response size. |
-| Providers | `src/providers/` | Parses Tencent and Sina data into shared canonical records without inventing missing values. |
+| Providers | `src/providers/` | Parses Tencent and Sina data, plus optional Tushare 09:25 final auction results, into shared canonical records without inventing missing values. |
 
 ## Persistence model
 
-The repository stores raw quote observations, compacted minute and daily bars, sector observations and summaries, provider health, maintenance results, collection gaps, and crash-consistent recovery cursors. Writes that advance recovery state and persist the represented market data share one transaction.
+The repository stores raw quote observations, compacted minute and daily bars, sector observations and summaries, final A-share auction results, provider health, maintenance results, collection gaps, and crash-consistent recovery cursors. Writes that advance recovery state and persist the represented market data share one transaction.
 
 SQLite runtime files and state configuration live under each adapter's configured storage root. DSH keeps its existing `market.sqlite` and `config.json` layout. Claude uses `claude-market.sqlite` and `claude-config.json` in its selected root, including a custom root, so it cannot open or modify DSH state when a user selects an overlapping directory. Neither adapter imports, migrates, or synchronizes the other's data. They are intentionally excluded from Git, npm packages, and the MCPB package.
 
 ## Safety boundaries
 
 - Read-only external HTTP requests; no broker, account, position, or order APIs.
-- Fixed reviewed hosts and routes; no arbitrary user-provided URLs, headers, cookies, or credentials.
+- Fixed reviewed hosts and routes; no arbitrary user-provided URLs, headers, or cookies. The optional Tushare token is read from the host process environment and sent only to its fixed API endpoint; see the [threat review](TUSHARE-AUCTION-THREAT-REVIEW.md).
 - Redirects are rejected.
 - Request duration, response size, symbol batch size, and global provider concurrency are bounded.
 - Missing market values remain `null`; they are never converted to zero.
