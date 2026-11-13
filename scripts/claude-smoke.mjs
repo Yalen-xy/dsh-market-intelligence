@@ -37,6 +37,7 @@ export async function runClaudeSmoke(bundleArgument, options = {}) {
     stderrCollectors: [],
     stdoutCollectors: [],
     timeoutMs: options.timeoutMs ?? OVERALL_TIMEOUT_MS,
+    phase: 'starting',
     onChild: options.onChild,
     timedOut: false,
   };
@@ -47,7 +48,8 @@ export async function runClaudeSmoke(bundleArgument, options = {}) {
     rejectDeadline = reject;
     timeout = setTimeout(() => {
       context.timedOut = true;
-      void shutdownOwnedChildren(context).then(() => rejectDeadline(new Error(`Claude MCPB smoke timed out after ${context.timeoutMs}ms`)));
+      const phase = context.phase;
+      void shutdownOwnedChildren(context).then(() => rejectDeadline(new Error(`Claude MCPB smoke timed out after ${context.timeoutMs}ms during ${phase}`)));
     }, context.timeoutMs);
   });
   try {
@@ -68,6 +70,7 @@ export async function runClaudeSmoke(bundleArgument, options = {}) {
 }
 
 async function runSmokeOperation(bundle, temporaryRoot, context, options) {
+  context.phase = 'extracting bundle';
   const packageDirectory = path.join(temporaryRoot, 'package');
   const guardPath = path.join(temporaryRoot, 'network-guard.mjs');
   const redirectedRoots = redirectedDirectories(temporaryRoot);
@@ -75,11 +78,15 @@ async function runSmokeOperation(bundle, temporaryRoot, context, options) {
   await Promise.all(Object.values(redirectedRoots).map((directory) => mkdir(directory, { recursive: true })));
   await writeFile(guardPath, networkGuardSource, 'utf8');
 
+  context.phase = 'running MCP client';
   const primary = await runClientSmoke(packageDirectory, temporaryRoot, guardPath, redirectedRoots, context, options.server);
+  context.phase = 'checking EOF shutdown';
   const eofExit = await runEofShutdownSmoke(packageDirectory, path.join(temporaryRoot, 'eof-storage'), guardPath, redirectedRoots, context, options.server);
+  context.phase = 'verifying storage release';
   const storageDirectories = [primary.storageDirectory, path.join(temporaryRoot, 'eof-storage')];
   assertInsideRoot(temporaryRoot, packageDirectory, guardPath, ...storageDirectories, ...Object.values(redirectedRoots));
   await verifyStorageReleased(storageDirectories);
+  context.phase = 'scanning redirected roots';
   const redirectedFiles = await scanRedirectedRoots(temporaryRoot, Object.values(redirectedRoots));
   assertRawSafety(context);
   assert.equal(primary.protocolErrors.length, 0, 'the staged server emitted a malformed MCP frame');
@@ -101,6 +108,7 @@ async function runSmokeOperation(bundle, temporaryRoot, context, options) {
 }
 
 async function runClientSmoke(packageDirectory, temporaryRoot, guardPath, redirectedRoots, context, server) {
+  context.phase = 'seeding client storage';
   const storageDirectory = path.join(temporaryRoot, 'client-storage');
   await seedClosedMarketState(storageDirectory);
   const transport = new StdioClientTransport(serverParameters(packageDirectory, storageDirectory, guardPath, redirectedRoots, server));
@@ -121,17 +129,20 @@ async function runClientSmoke(packageDirectory, temporaryRoot, guardPath, redire
   client.onerror = (error) => { protocolErrors.push(error.message); };
   context.client = client;
   context.transport = transport;
+  context.phase = 'connecting MCP client';
   await client.connect(transport);
   const child = transport._process;
   assert.ok(child, 'stdio client did not create its owned server process');
   const stdout = transport._smokeStdout;
   assert.ok(stdout, 'stdio stdout collector was not attached before initialization');
   const exited = closeResult(child);
+  context.phase = 'listing MCP tools';
   const listed = await client.listTools();
   const toolNames = listed.tools.map(({ name }) => name);
   assert.deepEqual(toolNames.toSorted(), TOOL_CALLS.map(({ name }) => name).toSorted(), 'staged server must list exactly seven tools');
   let structuredTextCalls = 0;
   for (const request of TOOL_CALLS) {
+    context.phase = `calling ${request.name}`;
     const result = await client.callTool(request);
     assert.notEqual(result.isError, true, `${request.name} returned a tool error`);
     assert.ok(Array.isArray(result.content) && result.content.length === 1 && result.content[0]?.type === 'text', `${request.name} did not return JSON text`);
@@ -139,7 +150,9 @@ async function runClientSmoke(packageDirectory, temporaryRoot, guardPath, redire
     validateToolResult(request.name, result.structuredContent);
     structuredTextCalls += 1;
   }
+  context.phase = 'closing MCP client';
   await client.close();
+  context.phase = 'waiting for MCP child exit';
   const { exitCode } = await exited;
   assert.equal(exitCode, 0, 'client close must allow the staged server to exit cleanly');
   context.client = undefined;
