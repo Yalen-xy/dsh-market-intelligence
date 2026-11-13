@@ -37,6 +37,7 @@ function hasUnsafeWindowsComponent(value: string): boolean {
 
 export async function getWindowsDriveType(driveRoot: string, execFileImpl: typeof execFile = execFile): Promise<number> {
   if (!WINDOWS_DRIVE_ROOT.test(driveRoot)) throw new Error('drive root must be a validated local Windows drive root');
+  if (process.env.CLAUDE_SMOKE_ROOT) process.stderr.write('claude_smoke drive_type_start\n');
   const output = await new Promise<string>((resolve, reject) => {
     execFileImpl(
       'powershell.exe',
@@ -45,6 +46,7 @@ export async function getWindowsDriveType(driveRoot: string, execFileImpl: typeo
       (error, stdout) => error === null ? resolve(String(stdout)) : reject(error),
     );
   });
+  if (process.env.CLAUDE_SMOKE_ROOT) process.stderr.write('claude_smoke drive_type_ready\n');
   const trimmedOutput = output.trim();
   if (!/^\d+$/.test(trimmedOutput)) throw new Error('unable to determine Windows drive type');
   const driveType = Number(trimmedOutput);

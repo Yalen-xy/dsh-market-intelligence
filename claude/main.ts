@@ -77,7 +77,9 @@ export async function runClaudeServer(
 
   let runtime: MarketRuntime;
   try {
+    if (environment.CLAUDE_SMOKE_ROOT) streams.stderr.write('claude_smoke runtime_start\n');
     runtime = await (streams.runtimeFactory ?? startMarketRuntime)(config, runtimeOptions);
+    if (environment.CLAUDE_SMOKE_ROOT) streams.stderr.write('claude_smoke runtime_ready\n');
   } catch (error) {
     logger.error('runtime');
     throw error;
@@ -114,8 +116,10 @@ export async function runClaudeServer(
   managed.server.onclose = handleSignal;
 
   try {
+    if (environment.CLAUDE_SMOKE_ROOT) streams.stderr.write('claude_smoke transport_start\n');
     const transport = (streams.transportFactory ?? ((input, output) => new ClaudeStdioServerTransport(input, output)))(streams.stdin, streams.stdout);
     await managed.server.connect(transport);
+    if (environment.CLAUDE_SMOKE_ROOT) streams.stderr.write('claude_smoke transport_ready\n');
   } catch (error) {
     logger.error('protocol');
     try {

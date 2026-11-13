@@ -34,6 +34,9 @@ jobs:
       - name: Typecheck Claude adapter
         run: npm run typecheck:claude
 
+      - name: Diagnose Claude MCPB smoke before suite
+        run: npm run test:claude:smoke
+
       - name: Test
         run: npm test
 
