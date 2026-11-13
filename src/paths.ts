@@ -5,10 +5,8 @@ import path from 'node:path';
 const WINDOWS_DRIVE_ROOT = /^[A-Za-z]:\\$/;
 const DRIVE_TYPE_SCRIPT = [
   "$driveRoot = $env:DSH_MARKET_DRIVE_ROOT",
-  "$deviceId = $driveRoot.TrimEnd('\\')",
-  "$disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter \"DeviceID='$deviceId'\"",
-  'if ($null -eq $disk) { exit 1 }',
-  '[Console]::Out.Write([string][int]$disk.DriveType)',
+  '$drive = [System.IO.DriveInfo]::new($driveRoot)',
+  '[Console]::Out.Write([string][int]$drive.DriveType)',
 ].join('; ');
 
 export function requireLocalWindowsPath(value: unknown, label: string, requiredBasename?: string): string {
@@ -37,7 +35,6 @@ function hasUnsafeWindowsComponent(value: string): boolean {
 
 export async function getWindowsDriveType(driveRoot: string, execFileImpl: typeof execFile = execFile): Promise<number> {
   if (!WINDOWS_DRIVE_ROOT.test(driveRoot)) throw new Error('drive root must be a validated local Windows drive root');
-  if (process.env.CLAUDE_SMOKE_ROOT) process.stderr.write('claude_smoke drive_type_start\n');
   const output = await new Promise<string>((resolve, reject) => {
     execFileImpl(
       'powershell.exe',
@@ -46,7 +43,6 @@ export async function getWindowsDriveType(driveRoot: string, execFileImpl: typeo
       (error, stdout) => error === null ? resolve(String(stdout)) : reject(error),
     );
   });
-  if (process.env.CLAUDE_SMOKE_ROOT) process.stderr.write('claude_smoke drive_type_ready\n');
   const trimmedOutput = output.trim();
   if (!/^\d+$/.test(trimmedOutput)) throw new Error('unable to determine Windows drive type');
   const driveType = Number(trimmedOutput);

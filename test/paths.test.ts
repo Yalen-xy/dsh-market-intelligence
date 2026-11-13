@@ -116,10 +116,8 @@ function execFileWithOutput(output: string): typeof execFile {
       '-Command',
       [
         "$driveRoot = $env:DSH_MARKET_DRIVE_ROOT",
-        "$deviceId = $driveRoot.TrimEnd('\\')",
-        "$disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter \"DeviceID='$deviceId'\"",
-        'if ($null -eq $disk) { exit 1 }',
-        '[Console]::Out.Write([string][int]$disk.DriveType)',
+        '$drive = [System.IO.DriveInfo]::new($driveRoot)',
+        '[Console]::Out.Write([string][int]$drive.DriveType)',
       ].join('; '),
     ]);
     assert.deepEqual(options, { env: { ...process.env, DSH_MARKET_DRIVE_ROOT: 'C:\\' } });
