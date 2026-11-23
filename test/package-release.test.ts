@@ -55,7 +55,7 @@ test('license bytes are pinned to LF for the installer package hash on every che
   assert.match(attributes, /^LICENSE text eol=lf$/m);
 });
 
-test('README provides two versionless customer downloads and keeps advanced commands in the install guide', async () => {
+test('README provides a versionless DSH download and keeps advanced commands in the install guide', async () => {
   const root = process.cwd();
   const readme = await readFile(path.join(root, 'README.md'), 'utf8');
   const installGuide = await readFile(path.join(root, 'docs', 'INSTALL.md'), 'utf8');
@@ -63,7 +63,7 @@ test('README provides two versionless customer downloads and keeps advanced comm
   const combined = [readme, installGuide, installerReadme].join('\n');
 
   assert.match(readme, /https:\/\/github\.com\/Yalen-xy\/dsh-market-intelligence\/releases\/latest\/download\/dsh-market-intelligence-latest\.zip/);
-  assert.match(readme, /https:\/\/github\.com\/Yalen-xy\/dsh-market-intelligence\/releases\/latest\/download\/claude-market-intelligence-latest\.mcpb/);
+  assert.doesNotMatch(readme, /Claude|\.mcpb\b/i);
   assert.match(readme, /INSTALL\.cmd/);
   assert.doesNotMatch(readme, /v\d+\.\d+\.\d+|```(?:powershell|cmd|bat)?/i);
   assert.doesNotMatch(readme, /Invoke-WebRequest|Invoke-RestMethod|SHA256SUMS\.txt|-AcceptLicense/);
@@ -73,38 +73,16 @@ test('README provides two versionless customer downloads and keeps advanced comm
   assert.match(installGuide, /-AcceptLicense/);
 });
 
-test('Claude documentation describes the Windows extension boundary without publishing local configuration details', async () => {
+test('old installation guide points to DSH without documenting an extension install', async () => {
   const root = process.cwd();
   const claudeGuide = await readFile(path.join(root, 'docs', 'CLAUDE.md'), 'utf8');
   const architecture = await readFile(path.join(root, 'docs', 'ARCHITECTURE.md'), 'utf8');
   const releaseWorkflow = await readFile(path.join(root, '.github', 'workflows', 'release.yml'), 'utf8');
 
-  assert.match(claudeGuide, /Settings\s*→\s*Extensions\s*→\s*Advanced settings\s*→\s*Install Extension/);
-  assert.match(claudeGuide, /claude-market-intelligence-latest\.mcpb/);
-  assert.match(claudeGuide, /Windows/i);
-  assert.match(claudeGuide, /(?:无需|不需要)手动(?:执行)?\s*npm|no manual npm/i);
-  assert.match(claudeGuide, /(?:无需|不需要)手动.*JSON|no manual JSON/i);
-  assert.match(claudeGuide, /Claude Desktop supplies the extension runtime; normal installation needs no dependency management/i);
-  assert.match(claudeGuide, /%LOCALAPPDATA%\\dsh-market-intelligence\\claude\\storages\\dsh-market-intelligence/i);
-  assert.match(claudeGuide, /claude-market\.sqlite/);
-  assert.match(claudeGuide, /claude-config\.json/);
-  assert.doesNotMatch(claudeGuide, /Node\.js|system Node|安装.*Node/i);
+  assert.match(claudeGuide, /\[[^\]\n]+\]\(INSTALL\.md\)/);
+  assert.doesNotMatch(claudeGuide, /Claude|\.mcpb\b|Install Extension/i);
   assert.match(releaseWorkflow, /Claude Desktop supplies the extension runtime; normal Claude installation needs no dependency management/i);
   assert.doesNotMatch(releaseWorkflow, /Claude Desktop[^\r\n]*Node\.js/i);
-  assert.match(claudeGuide, /D:\\[^\r\n`]+/);
-  assert.match(claudeGuide, /Claude.*DSH|DSH.*Claude/i);
-  assert.match(claudeGuide, /(?:独立|independent)[^\n]*(?:数据库|database)|(?:数据库|database)[^\n]*(?:独立|independent)/i);
-  assert.match(claudeGuide, /卸载|uninstall/i);
-  assert.match(claudeGuide, /诊断|diagnostic/i);
-
-  for (const tool of exactTools) {
-    assert.match(claudeGuide, new RegExp(`\\b${tool}\\b`));
-  }
-
-  assert.match(claudeGuide, /不构成投资建议/);
-  assert.ok(claudeGuide.includes(sourceRiskNotice), 'Claude guide must carry the canonical source-risk notice');
-  assert.match(claudeGuide, /https:\/\/www\.tencent\.com\/privacy-policy\//);
-  assert.match(claudeGuide, /https:\/\/corp\.sina\.com\.cn\/eng\/sina_priv_eng\.htm/);
   assert.match(architecture, /shared|共享/i);
   assert.match(architecture, /`src\/runtime\.ts`.*`src\/tool-contracts\.ts`/i);
   assert.match(architecture, /`src\/index\.ts` and `src\/tools\.ts` are explicitly DSH adapters/i);
@@ -162,7 +140,7 @@ test('installation documentation matches installer behavior and recovery boundar
 
 test('public documentation carries consistent limited-use and provider-risk terms', async () => {
   const root = process.cwd();
-  const files = ['README.md', 'docs/INSTALL.md', 'docs/CLAUDE.md', 'LICENSE', 'SECURITY.md'];
+  const files = ['README.md', 'docs/INSTALL.md', 'LICENSE', 'SECURITY.md'];
 
   for (const relativePath of files) {
     const content = await readFile(path.join(root, ...relativePath.split('/')), 'utf8');
