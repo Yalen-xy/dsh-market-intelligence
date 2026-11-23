@@ -20,12 +20,6 @@
 
 安装器会寻找 DSH 当前使用的受管 Profile，校验发布文件，并在动手前留下可恢复的备份。遇到仍在运行的 DSH 进程、校验失败或无法确认的安装环境时，它会直接停下。指定数据目录、升级、卸载和恢复见[安装与恢复指南](docs/INSTALL.md)。
 
-### Claude Desktop
-
-[下载最新版 Claude Windows 扩展](https://github.com/Yalen-xy/dsh-market-intelligence/releases/latest/download/claude-market-intelligence-latest.mcpb)
-
-该 `.mcpb` 扩展仅支持 Windows，不依赖 DSH 运行，也不需要手动执行 npm 或编写 JSON 配置。Claude 的安装、独立存储、诊断与卸载见 [Claude Desktop 指南](docs/CLAUDE.md)。
-
 ## 它提供什么
 
 - 识别 A 股、港股及主要指数的市场阶段，包括集合竞价和开市前时段。
@@ -40,7 +34,7 @@
 
 ## 工作原理
 
-共享核心由 DeepSeek Harness 或 Claude Desktop 适配器运行。调度器按中国内地和香港市场阶段控制采集频率；适配器从固定、经过审查的腾讯和新浪公开端点读取行情，并可在设置 `TUSHARE_TOKEN` 后向 Tushare 固定端点读取 A 股最终集合竞价数据；规范化层统一证券代码、时间与缺失值；SQLite 保存行情和数据源健康记录。交给工具调用方之前，每份数据都会经过状态与时效检查。
+插件通过 DeepSeek Harness 适配器运行。调度器按中国内地和香港市场阶段控制采集频率；适配器从固定、经过审查的腾讯和新浪公开端点读取行情，并可在设置 `TUSHARE_TOKEN` 后向 Tushare 固定端点读取 A 股最终集合竞价数据；规范化层统一证券代码、时间与缺失值；SQLite 保存行情和数据源健康记录。交给工具调用方之前，每份数据都会经过状态与时效检查。
 
 数据流、模块边界、存储约束和故障恢复设计都在[架构说明](docs/ARCHITECTURE.md)里。
 
@@ -67,7 +61,6 @@ Use is limited to personal, non-commercial, read-only research. Tencent and Sina
 ## 文档
 
 - [安装、升级、卸载与恢复](docs/INSTALL.md)
-- [Claude Desktop 安装、配置与诊断](docs/CLAUDE.md)
 - [七个工具的参数和返回值](docs/TOOLS.md)
 - [架构和数据流](docs/ARCHITECTURE.md)
 - [安全边界和漏洞报告](SECURITY.md)
